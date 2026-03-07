@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { View, ActivityIndicator } from "react-native";
+import { View, ActivityIndicator, Platform } from "react-native";
 import { Stack, useRouter, useSegments } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { SafeAreaProvider } from "react-native-safe-area-context";
@@ -24,11 +24,12 @@ function AuthRouter() {
     if (authLoading) return;
 
     const seg0 = segments[0] as string | undefined;
-    if (!seg0) return;
-
     const inAuth = seg0 === "auth";
     const inSetup = seg0 === "profile-setup";
     const inOnboarding = seg0 === "onboarding";
+    const inTabs = seg0 === "(tabs)";
+    // Deep routes (agent detail, trader profile) — don't touch these
+    const inDeepRoute = seg0 === "agent" || seg0 === "trader";
 
     if (!session) {
       if (!inAuth) router.replace("/auth/login");
@@ -37,7 +38,8 @@ function AuthRouter() {
     } else if (!hasSeenOnboarding) {
       if (!inOnboarding) router.replace("/onboarding");
     } else {
-      if (inAuth || inSetup || inOnboarding || seg0 === "index") {
+      // Redirect root / index / leftover auth routes to tabs
+      if (!inTabs && !inDeepRoute) {
         router.replace("/(tabs)");
       }
     }
@@ -105,31 +107,46 @@ function AppLoader() {
       <Stack
         screenOptions={{
           headerShown: false,
-          animation: "fade",
+          animation: Platform.OS === "web" ? "none" : "fade",
           contentStyle: { backgroundColor: "transparent" },
         }}
       >
         <Stack.Screen name="index" />
         <Stack.Screen
           name="onboarding"
-          options={{ animation: "fade", gestureEnabled: false }}
+          options={{
+            animation: Platform.OS === "web" ? "none" : "fade",
+            gestureEnabled: false,
+          }}
         />
         <Stack.Screen
           name="auth"
-          options={{ animation: "fade", gestureEnabled: false }}
+          options={{
+            animation: Platform.OS === "web" ? "none" : "fade",
+            gestureEnabled: false,
+          }}
         />
         <Stack.Screen
           name="profile-setup"
-          options={{ animation: "fade", gestureEnabled: false }}
+          options={{
+            animation: Platform.OS === "web" ? "none" : "fade",
+            gestureEnabled: false,
+          }}
         />
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
         <Stack.Screen
           name="agent/[id]"
-          options={{ headerShown: false, animation: "slide_from_right" }}
+          options={{
+            headerShown: false,
+            animation: Platform.OS === "web" ? "none" : "slide_from_right",
+          }}
         />
         <Stack.Screen
           name="trader/[id]"
-          options={{ headerShown: false, animation: "slide_from_right" }}
+          options={{
+            headerShown: false,
+            animation: Platform.OS === "web" ? "none" : "slide_from_right",
+          }}
         />
       </Stack>
       <OfflineBanner />
