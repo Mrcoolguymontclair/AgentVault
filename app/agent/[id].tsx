@@ -6,15 +6,19 @@ import {
   Pressable,
   Alert,
   ActivityIndicator,
-  ToastAndroid,
-  Platform,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { useTheme } from "@/hooks/useTheme";
+import { useAuthStore } from "@/store/authStore";
 import { useAgentStore } from "@/store/agentStore";
-import { fetchAgentTrades, type DbTrade } from "@/lib/services/agentService";
+import { fetchAgentTrades, fetchPublicAgent, type DbTrade } from "@/lib/services/agentService";
+import {
+  fetchFollowedAgentIds,
+  followAgent,
+  unfollowAgent,
+} from "@/lib/services/leaderboardService";
 import { invokeRunAgents } from "@/lib/services/functionService";
 import { formatCurrency, formatPercent } from "@/utils/format";
 import { Colors } from "@/constants/colors";
@@ -23,6 +27,7 @@ import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { STRATEGIES, RISK_CONFIG, AI_MODELS } from "@/constants/strategies";
 import type { StrategyId, ModelId } from "@/constants/strategies";
+import type { Agent } from "@/store/agentStore";
 
 const STATUS_BADGES: Record<string, { variant: any; label: string }> = {
   active: { variant: "success", label: "Active" },
@@ -35,66 +40,98 @@ export default function AgentDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const { colors } = useTheme();
+  const { user: authUser } = useAuthStore();
   const { agents, toggleAgent, deleteAgent } = useAgentStore();
+
+  const [agent, setAgent] = useState<Agent | null>(null);
+  const [publicOwnerName, setPublicOwnerName] = useState<string>("");
+  const [publicOwnerAvatar, setPublicOwnerAvatar] = useState<string>("🚀");
+  const [isOwnAgent, setIsOwnAgent] = useState(false);
   const [trades, setTrades] = useState<DbTrade[]>([]);
   const [tradesLoading, setTradesLoading] = useState(true);
+  const [pageLoading, setPageLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
   const [runLoading, setRunLoading] = useState(false);
+  const [isFollowing, setIsFollowing] = useState(false);
+  const [followCount, setFollowCount] = useState(0);
 
-  const agent = agents.find((a) => a.id === id);
-
+  // Load agent — from store (own) or from DB (public)
   useEffect(() => {
     if (!id) return;
-    fetchAgentTrades(id, 50).then(({ data }) => {
-      setTrades(data ?? []);
+
+    async function load() {
+      setPageLoading(true);
+
+      // Check own store first
+      const ownAgent = agents.find((a) => a.id === id);
+      if (ownAgent) {
+        setAgent(ownAgent);
+        setIsOwnAgent(true);
+        setPageLoading(false);
+      } else {
+        // Fetch from DB (other user's public agent)
+        const { data } = await fetchPublicAgent(id);
+        if (data) {
+          setAgent({
+            id: data.id,
+            userId: data.user_id,
+            name: data.name,
+            strategy: data.strategy as StrategyId,
+            status: data.status,
+            pnl: Number(data.pnl),
+            pnlPct: Number(data.pnl_pct),
+            trades: data.trades_count,
+            winRate: Number(data.win_rate),
+            createdAt: new Date(data.created_at).toLocaleDateString("en-US", {
+              month: "short", day: "numeric", year: "numeric",
+            }),
+            mode: data.mode,
+            description: data.description,
+            maxDrawdown: Number(data.max_drawdown),
+            sharpeRatio: Number(data.sharpe_ratio),
+            config: data.config ?? {},
+            budget: Number(data.budget ?? 1000),
+            isPrivate: data.is_private ?? false,
+            modelId: (data.model_id as ModelId) ?? "groq_llama",
+          });
+          setPublicOwnerName(data.profiles?.display_name ?? "Trader");
+          setPublicOwnerAvatar(data.profiles?.avatar ?? "🚀");
+          setIsOwnAgent(data.user_id === authUser?.id);
+        }
+        setPageLoading(false);
+      }
+
+      // Load trades
+      const { data: tradeData } = await fetchAgentTrades(id, 50);
+      setTrades(tradeData ?? []);
       setTradesLoading(false);
-    });
-  }, [id]);
+
+      // Load follow state
+      if (authUser?.id) {
+        const followed = await fetchFollowedAgentIds(authUser.id);
+        setIsFollowing(followed.has(id));
+      }
+    }
+
+    load();
+  }, [id, authUser?.id]);
+
+  // Keep agent in sync with store changes (for own agents)
+  useEffect(() => {
+    if (!isOwnAgent || !id) return;
+    const updated = agents.find((a) => a.id === id);
+    if (updated) setAgent(updated);
+  }, [agents, id, isOwnAgent]);
 
   const handleToggle = useCallback(async () => {
-    if (!agent) return;
+    if (!agent || !isOwnAgent) return;
     setActionLoading(true);
     await toggleAgent(agent.id);
     setActionLoading(false);
-  }, [agent, toggleAgent]);
-
-  const handleRunNow = useCallback(async () => {
-    if (!agent) return;
-    setRunLoading(true);
-    const result = await invokeRunAgents(agent.id, true);
-    setRunLoading(false);
-
-    if (!result.ok) {
-      Alert.alert("Run Failed", result.error ?? "Something went wrong.");
-      return;
-    }
-
-    const r = result.results?.[0];
-    if (!r) {
-      Alert.alert("No Result", "Agent ran but returned no result.");
-      return;
-    }
-
-    if (r.skipped) {
-      const msg = r.skipReason ?? "No signal generated.";
-      Alert.alert("No Trade", msg);
-    } else if (r.success) {
-      const pnlStr = r.pnl !== undefined && r.pnl !== 0
-        ? ` · P&L: ${r.pnl >= 0 ? "+" : ""}$${r.pnl.toFixed(2)}`
-        : "";
-      Alert.alert(
-        "Trade Executed",
-        `${r.side?.toUpperCase()} ${r.qty} ${r.symbol} @ $${r.price?.toFixed(2)}${pnlStr}\n\nAI: ${r.aiReasoning}`
-      );
-      // Reload trades to show the new one
-      fetchAgentTrades(agent.id, 50).then(({ data }) => setTrades(data ?? []));
-    } else {
-      Alert.alert("Trade Failed", r.error ?? "Execution error.");
-    }
-  }, [agent]);
+  }, [agent, isOwnAgent, toggleAgent]);
 
   const handleDelete = useCallback(() => {
-    if (!agent) return;
+    if (!agent || !isOwnAgent) return;
     Alert.alert(
       "Delete Agent",
       `Are you sure you want to permanently delete "${agent.name}"? This cannot be undone.`,
@@ -107,16 +144,67 @@ export default function AgentDetailScreen() {
             setActionLoading(true);
             const { error } = await deleteAgent(agent.id);
             setActionLoading(false);
-            if (error) {
-              Alert.alert("Error", "Failed to delete agent. Please try again.");
-            } else {
-              router.back();
-            }
+            if (error) Alert.alert("Error", "Failed to delete agent.");
+            else router.back();
           },
         },
       ]
     );
-  }, [agent, deleteAgent, router]);
+  }, [agent, isOwnAgent, deleteAgent, router]);
+
+  const handleRunNow = useCallback(async () => {
+    if (!agent) return;
+    setRunLoading(true);
+    const result = await invokeRunAgents(agent.id, true);
+    setRunLoading(false);
+
+    if (!result.ok) {
+      Alert.alert("Run Failed", result.error ?? "Something went wrong.");
+      return;
+    }
+    const r = result.results?.[0];
+    if (!r) { Alert.alert("No Result", "Agent ran but returned no result."); return; }
+
+    if (r.skipped) {
+      Alert.alert("No Trade", r.skipReason ?? "No signal generated.");
+    } else if (r.success) {
+      const pnlStr = r.pnl !== undefined && r.pnl !== 0
+        ? ` · P&L: ${r.pnl >= 0 ? "+" : ""}$${r.pnl.toFixed(2)}` : "";
+      Alert.alert(
+        "Trade Executed",
+        `${r.side?.toUpperCase()} ${r.qty} ${r.symbol} @ $${r.price?.toFixed(2)}${pnlStr}\n\nAI: ${r.aiReasoning}`
+      );
+      fetchAgentTrades(agent.id, 50).then(({ data }) => setTrades(data ?? []));
+    } else {
+      Alert.alert("Trade Failed", r.error ?? "Execution error.");
+    }
+  }, [agent]);
+
+  const handleFollow = useCallback(async () => {
+    if (!authUser?.id || !agent) return;
+    const nextFollowing = !isFollowing;
+    setIsFollowing(nextFollowing);
+    setFollowCount((c) => c + (nextFollowing ? 1 : -1));
+
+    const { error } = nextFollowing
+      ? await followAgent(authUser.id, agent.id)
+      : await unfollowAgent(authUser.id, agent.id);
+
+    if (error) {
+      setIsFollowing(!nextFollowing);
+      setFollowCount((c) => c + (nextFollowing ? -1 : 1));
+    }
+  }, [authUser?.id, agent, isFollowing]);
+
+  if (pageLoading) {
+    return (
+      <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
+        <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
+          <ActivityIndicator size="large" color={Colors.accent} />
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   if (!agent) {
     return (
@@ -131,12 +219,11 @@ export default function AgentDetailScreen() {
   }
 
   const sb = STATUS_BADGES[agent.status];
-  const canToggle = agent.status === "active" || agent.status === "paused";
+  const canToggle = isOwnAgent && (agent.status === "active" || agent.status === "paused");
   const strategyDef = STRATEGIES.find((s) => s.id === (agent.strategy as StrategyId));
   const modelDef = AI_MODELS.find((m) => m.id === (agent.modelId as ModelId));
   const riskConfig = strategyDef ? RISK_CONFIG[strategyDef.risk] : null;
-  const totalPnL = agent.pnl;
-  const isPositive = totalPnL >= 0;
+  const isPositive = agent.pnl >= 0;
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top", "bottom"]}>
@@ -148,25 +235,21 @@ export default function AgentDetailScreen() {
           paddingHorizontal: 16,
           paddingTop: 8,
           paddingBottom: 12,
-          gap: 12,
+          gap: 10,
         }}
       >
         <Pressable
           onPress={() => router.back()}
           hitSlop={12}
           style={{
-            width: 38,
-            height: 38,
-            borderRadius: 12,
-            backgroundColor: colors.card,
-            borderWidth: 1,
-            borderColor: colors.cardBorder,
-            alignItems: "center",
-            justifyContent: "center",
+            width: 38, height: 38, borderRadius: 12,
+            backgroundColor: colors.card, borderWidth: 1, borderColor: colors.cardBorder,
+            alignItems: "center", justifyContent: "center",
           }}
         >
           <Ionicons name="chevron-back" size={20} color={colors.text} />
         </Pressable>
+
         <View style={{ flex: 1 }}>
           <Text
             style={{ color: colors.text, fontSize: 18, fontWeight: "800", letterSpacing: -0.4 }}
@@ -174,51 +257,75 @@ export default function AgentDetailScreen() {
           >
             {agent.name}
           </Text>
-          <Text style={{ color: colors.textSecondary, fontSize: 13, marginTop: 1 }}>
-            {strategyDef?.name ?? agent.strategy}
-          </Text>
-        </View>
-        <View style={{ flexDirection: "row", gap: 8 }}>
-          <Pressable
-            onPress={handleRunNow}
-            disabled={runLoading}
-            hitSlop={8}
-            style={{
-              height: 38,
-              paddingHorizontal: 14,
-              borderRadius: 12,
-              backgroundColor: Colors.accentBg,
-              borderWidth: 1,
-              borderColor: Colors.accent,
-              alignItems: "center",
-              justifyContent: "center",
-              flexDirection: "row",
-              gap: 6,
-              opacity: runLoading ? 0.6 : 1,
-            }}
-          >
-            {runLoading
-              ? <ActivityIndicator size="small" color={Colors.accentLight} />
-              : <Ionicons name="play-circle" size={16} color={Colors.accentLight} />
-            }
-            <Text style={{ color: Colors.accentLight, fontWeight: "700", fontSize: 13 }}>
-              {runLoading ? "Running…" : "Run Now"}
+          {!isOwnAgent && (
+            <Text style={{ color: colors.textSecondary, fontSize: 12, marginTop: 1 }}>
+              {publicOwnerAvatar} {publicOwnerName}
             </Text>
-          </Pressable>
-          <Pressable
-            onPress={handleDelete}
-            hitSlop={12}
-            style={{
-              width: 38,
-              height: 38,
-              borderRadius: 12,
-              backgroundColor: Colors.dangerBg,
-              alignItems: "center",
-              justifyContent: "center",
-            }}
-          >
-            <Ionicons name="trash-outline" size={18} color={Colors.danger} />
-          </Pressable>
+          )}
+        </View>
+
+        {/* Right-side actions */}
+        <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
+          {isOwnAgent && (
+            <>
+              <Pressable
+                onPress={handleRunNow}
+                disabled={runLoading}
+                style={{
+                  height: 38, paddingHorizontal: 12, borderRadius: 12,
+                  backgroundColor: Colors.accentBg, borderWidth: 1, borderColor: Colors.accent,
+                  alignItems: "center", justifyContent: "center",
+                  flexDirection: "row", gap: 5, opacity: runLoading ? 0.6 : 1,
+                }}
+              >
+                {runLoading
+                  ? <ActivityIndicator size="small" color={Colors.accentLight} />
+                  : <Ionicons name="play-circle" size={15} color={Colors.accentLight} />
+                }
+                <Text style={{ color: Colors.accentLight, fontWeight: "700", fontSize: 13 }}>
+                  {runLoading ? "Running…" : "Run Now"}
+                </Text>
+              </Pressable>
+              <Pressable
+                onPress={handleDelete}
+                hitSlop={12}
+                style={{
+                  width: 38, height: 38, borderRadius: 12,
+                  backgroundColor: Colors.dangerBg,
+                  alignItems: "center", justifyContent: "center",
+                }}
+              >
+                <Ionicons name="trash-outline" size={18} color={Colors.danger} />
+              </Pressable>
+            </>
+          )}
+
+          {!isOwnAgent && (
+            <Pressable
+              onPress={handleFollow}
+              style={{
+                height: 38, paddingHorizontal: 14, borderRadius: 12,
+                backgroundColor: isFollowing ? Colors.accentBg : colors.card,
+                borderWidth: 1.5,
+                borderColor: isFollowing ? Colors.accent : colors.cardBorder,
+                flexDirection: "row", alignItems: "center", gap: 6,
+              }}
+            >
+              <Ionicons
+                name={isFollowing ? "heart" : "heart-outline"}
+                size={16}
+                color={isFollowing ? Colors.accent : colors.textSecondary}
+              />
+              <Text
+                style={{
+                  color: isFollowing ? Colors.accentLight : colors.textSecondary,
+                  fontWeight: "700", fontSize: 13,
+                }}
+              >
+                {isFollowing ? "Following" : "Follow"}
+              </Text>
+            </Pressable>
+          )}
         </View>
       </View>
 
@@ -226,13 +333,11 @@ export default function AgentDetailScreen() {
         showsVerticalScrollIndicator={false}
         contentContainerStyle={{ paddingHorizontal: 16, gap: 16, paddingBottom: 32 }}
       >
-        {/* Hero P&L Card */}
+        {/* Hero P&L */}
         <View
           style={{
             backgroundColor: isPositive ? Colors.successBg : Colors.dangerBg,
-            borderRadius: 20,
-            padding: 20,
-            gap: 6,
+            borderRadius: 20, padding: 20, gap: 6,
           }}
         >
           <View style={{ flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 4 }}>
@@ -241,27 +346,18 @@ export default function AgentDetailScreen() {
             <Badge
               label={agent.mode === "live" ? "Live" : "Paper"}
               variant={agent.mode === "live" ? "live" : "paper"}
-              size="md"
-              dot
+              size="md" dot
             />
           </View>
           <Text
             style={{
               color: isPositive ? Colors.success : Colors.danger,
-              fontSize: 40,
-              fontWeight: "900",
-              letterSpacing: -1,
+              fontSize: 40, fontWeight: "900", letterSpacing: -1,
             }}
           >
-            {formatCurrency(totalPnL, true)}
+            {formatCurrency(agent.pnl, true)}
           </Text>
-          <Text
-            style={{
-              color: isPositive ? Colors.success : Colors.danger,
-              fontSize: 16,
-              fontWeight: "600",
-            }}
-          >
+          <Text style={{ color: isPositive ? Colors.success : Colors.danger, fontSize: 16, fontWeight: "600" }}>
             {formatPercent(agent.pnlPct)} total return
           </Text>
           <Text style={{ color: colors.textTertiary, fontSize: 12, marginTop: 4 }}>
@@ -280,14 +376,9 @@ export default function AgentDetailScreen() {
             <View
               key={s.label}
               style={{
-                flex: 1,
-                backgroundColor: colors.card,
-                borderRadius: 14,
-                borderWidth: 1,
-                borderColor: colors.cardBorder,
-                padding: 12,
-                alignItems: "center",
-                gap: 4,
+                flex: 1, backgroundColor: colors.card, borderRadius: 14,
+                borderWidth: 1, borderColor: colors.cardBorder,
+                padding: 12, alignItems: "center", gap: 4,
               }}
             >
               <Ionicons name={s.icon as any} size={16} color={colors.textSecondary} />
@@ -299,16 +390,12 @@ export default function AgentDetailScreen() {
           ))}
         </View>
 
-        {/* Backtesting Banner */}
+        {/* Backtesting banner */}
         {agent.status === "backtesting" && (
           <View
             style={{
-              backgroundColor: Colors.accentBg,
-              borderRadius: 14,
-              padding: 14,
-              flexDirection: "row",
-              alignItems: "center",
-              gap: 10,
+              backgroundColor: Colors.accentBg, borderRadius: 14, padding: 14,
+              flexDirection: "row", alignItems: "center", gap: 10,
             }}
           >
             <ActivityIndicator size="small" color={Colors.accentLight} />
@@ -317,33 +404,29 @@ export default function AgentDetailScreen() {
                 Backtesting in Progress
               </Text>
               <Text style={{ color: Colors.accent, fontSize: 12, marginTop: 2 }}>
-                Your agent is analyzing historical data. Results will be ready soon.
+                Analyzing historical data — results coming soon.
               </Text>
             </View>
           </View>
         )}
 
-        {/* Actions */}
+        {/* Own agent — Pause/Resume */}
         {canToggle && (
-          <View style={{ flexDirection: "row", gap: 10 }}>
-            <View style={{ flex: 1 }}>
-              <Button
-                variant={agent.status === "active" ? "ghost" : "primary"}
-                size="md"
-                onPress={handleToggle}
-                loading={actionLoading}
-                icon={
-                  <Ionicons
-                    name={agent.status === "active" ? "pause-circle-outline" : "play-circle-outline"}
-                    size={18}
-                    color={agent.status === "active" ? colors.text : "#fff"}
-                  />
-                }
-              >
-                {agent.status === "active" ? "Pause Agent" : "Resume Agent"}
-              </Button>
-            </View>
-          </View>
+          <Button
+            variant={agent.status === "active" ? "ghost" : "primary"}
+            size="md"
+            onPress={handleToggle}
+            loading={actionLoading}
+            icon={
+              <Ionicons
+                name={agent.status === "active" ? "pause-circle-outline" : "play-circle-outline"}
+                size={18}
+                color={agent.status === "active" ? colors.text : "#fff"}
+              />
+            }
+          >
+            {agent.status === "active" ? "Pause Agent" : "Resume Agent"}
+          </Button>
         )}
 
         {/* Configuration */}
@@ -351,21 +434,14 @@ export default function AgentDetailScreen() {
           <Card>
             <Text
               style={{
-                color: colors.textSecondary,
-                fontSize: 11,
-                fontWeight: "700",
-                textTransform: "uppercase",
-                letterSpacing: 0.6,
-                marginBottom: 12,
+                color: colors.textSecondary, fontSize: 11, fontWeight: "700",
+                textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 12,
               }}
             >
               Configuration
             </Text>
-            {/* Strategy */}
             <InfoRow label="Strategy" value={strategyDef.name} icon="layers-outline" colors={colors} />
-            {riskConfig && (
-              <InfoRow label="Risk Level" value={riskConfig.label} icon="shield-outline" colors={colors} />
-            )}
+            {riskConfig && <InfoRow label="Risk Level" value={riskConfig.label} icon="shield-outline" colors={colors} />}
             {modelDef && (
               <InfoRow
                 label="AI Model"
@@ -381,18 +457,13 @@ export default function AgentDetailScreen() {
               colors={colors}
             />
 
-            {/* Params */}
             {Object.keys(agent.config).length > 0 && (
               <>
                 <View style={{ height: 1, backgroundColor: colors.divider, marginVertical: 12 }} />
                 <Text
                   style={{
-                    color: colors.textTertiary,
-                    fontSize: 11,
-                    fontWeight: "600",
-                    textTransform: "uppercase",
-                    letterSpacing: 0.5,
-                    marginBottom: 10,
+                    color: colors.textTertiary, fontSize: 11, fontWeight: "600",
+                    textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 10,
                   }}
                 >
                   Parameters
@@ -427,7 +498,7 @@ export default function AgentDetailScreen() {
               <View style={{ alignItems: "center", gap: 8, paddingVertical: 8 }}>
                 <Ionicons name="swap-horizontal-outline" size={36} color={colors.textTertiary} />
                 <Text style={{ color: colors.textSecondary, fontSize: 14, textAlign: "center" }}>
-                  No trades yet. Trades will appear here once your agent starts trading.
+                  No trades yet.
                 </Text>
               </View>
             </Card>
@@ -440,26 +511,12 @@ export default function AgentDetailScreen() {
   );
 }
 
-function InfoRow({
-  label,
-  value,
-  icon,
-  colors,
-}: {
-  label: string;
-  value: string;
-  icon?: string;
-  colors: any;
-}) {
+function InfoRow({ label, value, icon, colors }: { label: string; value: string; icon?: string; colors: any }) {
   return (
     <View
       style={{
-        flexDirection: "row",
-        alignItems: "center",
-        justifyContent: "space-between",
-        paddingVertical: 10,
-        borderBottomWidth: 1,
-        borderBottomColor: colors.divider,
+        flexDirection: "row", alignItems: "center", justifyContent: "space-between",
+        paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: colors.divider,
       }}
     >
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
@@ -482,24 +539,16 @@ function TradeRow({ trade, colors }: { trade: DbTrade; colors: any }) {
   return (
     <View
       style={{
-        backgroundColor: colors.card,
-        borderRadius: 14,
-        borderWidth: 1,
-        borderColor: colors.cardBorder,
-        padding: 14,
-        flexDirection: "row",
-        alignItems: "center",
-        gap: 12,
+        backgroundColor: colors.card, borderRadius: 14, borderWidth: 1,
+        borderColor: colors.cardBorder, padding: 14,
+        flexDirection: "row", alignItems: "center", gap: 12,
       }}
     >
       <View
         style={{
-          width: 40,
-          height: 40,
-          borderRadius: 12,
+          width: 40, height: 40, borderRadius: 12,
           backgroundColor: isBuy ? Colors.successBg : Colors.dangerBg,
-          alignItems: "center",
-          justifyContent: "center",
+          alignItems: "center", justifyContent: "center",
         }}
       >
         <Ionicons
@@ -521,8 +570,7 @@ function TradeRow({ trade, colors }: { trade: DbTrade; colors: any }) {
         <Text
           style={{
             color: isProfit ? Colors.success : pnl === 0 ? colors.textSecondary : Colors.danger,
-            fontWeight: "700",
-            fontSize: 14,
+            fontWeight: "700", fontSize: 14,
           }}
         >
           {pnl === 0 ? "—" : formatCurrency(pnl, true)}

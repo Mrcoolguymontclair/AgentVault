@@ -19,6 +19,7 @@ export type AgentMode = "paper" | "live";
 
 export interface Agent {
   id: string;
+  userId: string;
   name: string;
   strategy: StrategyId;
   status: AgentStatus;
@@ -52,6 +53,7 @@ export interface Trade {
 function dbAgentToAgent(a: DbAgent): Agent {
   return {
     id: a.id,
+    userId: a.user_id,
     name: a.name,
     strategy: a.strategy as StrategyId,
     status: a.status,

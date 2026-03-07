@@ -114,6 +114,20 @@ export async function fetchRecentTrades(userId: string, limit = 10) {
   return { data: data as DbTrade[] | null, error: error?.message ?? null };
 }
 
+export interface DbPublicAgent extends DbAgent {
+  profiles: { display_name: string; avatar: string } | null;
+}
+
+export async function fetchPublicAgent(agentId: string) {
+  const { data, error } = await supabase
+    .from("agents")
+    .select("*, profiles(display_name, avatar)")
+    .eq("id", agentId)
+    .single();
+
+  return { data: data as DbPublicAgent | null, error: error?.message ?? null };
+}
+
 export async function fetchAgentTrades(agentId: string, limit = 50) {
   const { data, error } = await supabase
     .from("trades")
