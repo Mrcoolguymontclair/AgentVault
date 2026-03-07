@@ -1,5 +1,7 @@
 import { supabase } from "@/lib/supabase";
 import type { AgentStatus, AgentMode } from "@/store/agentStore";
+import type { StrategyId, ModelId } from "@/constants/strategies";
+import { TIER_LIMITS } from "@/constants/strategies";
 
 export interface DbAgent {
   id: string;
@@ -15,6 +17,10 @@ export interface DbAgent {
   win_rate: number;
   max_drawdown: number;
   sharpe_ratio: number;
+  config: Record<string, number>;
+  budget: number;
+  is_private: boolean;
+  model_id: ModelId;
   created_at: string;
 }
 
@@ -31,6 +37,17 @@ export interface DbTrade {
   agents?: { name: string };
 }
 
+export interface CreateAgentInput {
+  name: string;
+  strategy: StrategyId;
+  description: string;
+  mode: AgentMode;
+  config: Record<string, number>;
+  budget: number;
+  is_private: boolean;
+  model_id: ModelId;
+}
+
 export async function fetchUserAgents(userId: string) {
   const { data, error } = await supabase
     .from("agents")
@@ -41,10 +58,43 @@ export async function fetchUserAgents(userId: string) {
   return { data: data as DbAgent[] | null, error: error?.message ?? null };
 }
 
-export async function updateAgentStatus(
-  agentId: string,
-  status: AgentStatus
-) {
+export async function createAgent(userId: string, input: CreateAgentInput) {
+  const { data, error } = await supabase
+    .from("agents")
+    .insert({
+      user_id: userId,
+      name: input.name,
+      strategy: input.strategy,
+      description: input.description,
+      status: "backtesting" as AgentStatus,
+      mode: input.mode,
+      config: input.config,
+      budget: input.budget,
+      is_private: input.is_private,
+      model_id: input.model_id,
+      pnl: 0,
+      pnl_pct: 0,
+      trades_count: 0,
+      win_rate: 0,
+      max_drawdown: 0,
+      sharpe_ratio: 0,
+    })
+    .select()
+    .single();
+
+  return { data: data as DbAgent | null, error: error?.message ?? null };
+}
+
+export async function deleteAgent(agentId: string) {
+  const { error } = await supabase
+    .from("agents")
+    .delete()
+    .eq("id", agentId);
+
+  return { error: error?.message ?? null };
+}
+
+export async function updateAgentStatus(agentId: string, status: AgentStatus) {
   const { error } = await supabase
     .from("agents")
     .update({ status, updated_at: new Date().toISOString() })
@@ -62,6 +112,32 @@ export async function fetchRecentTrades(userId: string, limit = 10) {
     .limit(limit);
 
   return { data: data as DbTrade[] | null, error: error?.message ?? null };
+}
+
+export async function fetchAgentTrades(agentId: string, limit = 50) {
+  const { data, error } = await supabase
+    .from("trades")
+    .select("*, agents(name)")
+    .eq("agent_id", agentId)
+    .order("executed_at", { ascending: false })
+    .limit(limit);
+
+  return { data: data as DbTrade[] | null, error: error?.message ?? null };
+}
+
+export async function checkAgentLimit(
+  userId: string,
+  plan: string
+): Promise<{ canCreate: boolean; current: number; limit: number }> {
+  const { data } = await supabase
+    .from("agents")
+    .select("id", { count: "exact" })
+    .eq("user_id", userId)
+    .neq("status", "stopped");
+
+  const current = data?.length ?? 0;
+  const limit = TIER_LIMITS[plan as keyof typeof TIER_LIMITS] ?? TIER_LIMITS.free;
+  return { canCreate: current < limit, current, limit };
 }
 
 export function subscribeToTrades(

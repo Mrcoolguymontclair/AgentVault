@@ -8,6 +8,7 @@ import {
   Switch,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { useTheme } from "@/hooks/useTheme";
 import { useAuthStore } from "@/store/authStore";
@@ -16,10 +17,12 @@ import { Card, PressableCard } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { Modal } from "@/components/ui/Modal";
 import { CardSkeleton } from "@/components/ui/LoadingSkeleton";
+import { DeploySheet } from "@/components/agents/DeploySheet";
 import { formatCurrency, formatPercent } from "@/utils/format";
 import { Colors } from "@/constants/colors";
+import { STRATEGIES, RISK_CONFIG } from "@/constants/strategies";
+import type { StrategyId } from "@/constants/strategies";
 
 type FilterStatus = "all" | AgentStatus;
 
@@ -31,15 +34,16 @@ const STATUS_BADGES: Record<AgentStatus, { variant: any; label: string }> = {
 };
 
 export default function AgentsScreen() {
+  const router = useRouter();
   const { colors } = useTheme();
   const { user: authUser } = useAuthStore();
   const { agents, toggleAgent, isLoading, loadAgents } = useAgentStore();
   const [filter, setFilter] = useState<FilterStatus>("all");
-  const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
   const [refreshing, setRefreshing] = useState(false);
-  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showDeploy, setShowDeploy] = useState(false);
 
   const filtered = filter === "all" ? agents : agents.filter((a) => a.status === filter);
+  const activeCount = agents.filter((a) => a.status === "active").length;
 
   async function onRefresh() {
     setRefreshing(true);
@@ -68,20 +72,22 @@ export default function AgentsScreen() {
         }}
       >
         <View>
-          <Text style={{ color: colors.text, fontSize: 26, fontWeight: "800", letterSpacing: -0.8 }}>
+          <Text
+            style={{ color: colors.text, fontSize: 26, fontWeight: "800", letterSpacing: -0.8 }}
+          >
             My Agents
           </Text>
           <Text style={{ color: colors.textSecondary, fontSize: 13, marginTop: 2 }}>
-            {agents.filter((a) => a.status === "active").length} running · {agents.length} total
+            {activeCount} running · {agents.length} total
           </Text>
         </View>
         <Button
           variant="primary"
           size="sm"
           icon={<Ionicons name="add" size={16} color="#fff" />}
-          onPress={() => setShowCreateModal(true)}
+          onPress={() => setShowDeploy(true)}
         >
-          New Agent
+          Deploy
         </Button>
       </View>
 
@@ -91,30 +97,62 @@ export default function AgentsScreen() {
         showsHorizontalScrollIndicator={false}
         contentContainerStyle={{ paddingHorizontal: 16, gap: 8, paddingBottom: 12 }}
       >
-        {FILTERS.map((f) => (
-          <Pressable
-            key={f.value}
-            onPress={() => setFilter(f.value)}
-            style={{
-              paddingHorizontal: 16,
-              paddingVertical: 8,
-              borderRadius: 100,
-              backgroundColor: filter === f.value ? Colors.accent : colors.card,
-              borderWidth: 1,
-              borderColor: filter === f.value ? Colors.accent : colors.cardBorder,
-            }}
-          >
-            <Text
+        {FILTERS.map((f) => {
+          const count =
+            f.value === "all"
+              ? agents.length
+              : agents.filter((a) => a.status === f.value).length;
+          return (
+            <Pressable
+              key={f.value}
+              onPress={() => setFilter(f.value)}
               style={{
-                color: filter === f.value ? "#FFFFFF" : colors.textSecondary,
-                fontWeight: "600",
-                fontSize: 13,
+                paddingHorizontal: 16,
+                paddingVertical: 8,
+                borderRadius: 100,
+                backgroundColor: filter === f.value ? Colors.accent : colors.card,
+                borderWidth: 1,
+                borderColor: filter === f.value ? Colors.accent : colors.cardBorder,
+                flexDirection: "row",
+                alignItems: "center",
+                gap: 6,
               }}
             >
-              {f.label}
-            </Text>
-          </Pressable>
-        ))}
+              <Text
+                style={{
+                  color: filter === f.value ? "#FFFFFF" : colors.textSecondary,
+                  fontWeight: "600",
+                  fontSize: 13,
+                }}
+              >
+                {f.label}
+              </Text>
+              {count > 0 && (
+                <View
+                  style={{
+                    backgroundColor: filter === f.value ? "rgba(255,255,255,0.25)" : colors.cardBorder,
+                    borderRadius: 100,
+                    minWidth: 18,
+                    height: 18,
+                    alignItems: "center",
+                    justifyContent: "center",
+                    paddingHorizontal: 5,
+                  }}
+                >
+                  <Text
+                    style={{
+                      color: filter === f.value ? "#fff" : colors.textSecondary,
+                      fontSize: 11,
+                      fontWeight: "700",
+                    }}
+                  >
+                    {count}
+                  </Text>
+                </View>
+              )}
+            </Pressable>
+          );
+        })}
       </ScrollView>
 
       {/* Agent List */}
@@ -141,11 +179,11 @@ export default function AgentsScreen() {
             title="No Agents Found"
             description={
               filter === "all"
-                ? "You haven't created any agents yet. Build your first AI trading agent in minutes."
+                ? "You haven't deployed any agents yet. Choose a strategy and launch your first AI trading agent."
                 : `No agents with status "${filter}" found.`
             }
-            ctaLabel={filter === "all" ? "Create First Agent" : undefined}
-            onCta={filter === "all" ? () => setShowCreateModal(true) : undefined}
+            ctaLabel={filter === "all" ? "Deploy First Agent" : undefined}
+            onCta={filter === "all" ? () => setShowDeploy(true) : undefined}
           />
         ) : (
           filtered.map((agent) => (
@@ -153,74 +191,22 @@ export default function AgentsScreen() {
               key={agent.id}
               agent={agent}
               colors={colors}
-              onPress={() => setSelectedAgent(agent)}
+              onPress={() => router.push(`/agent/${agent.id}` as any)}
               onToggle={() => toggleAgent(agent.id)}
             />
           ))
         )}
       </ScrollView>
 
-      {/* Agent Detail Modal */}
-      {selectedAgent && (
-        <AgentDetailModal
-          agent={selectedAgent}
-          onClose={() => setSelectedAgent(null)}
-          colors={colors}
-          onToggle={() => {
-            toggleAgent(selectedAgent.id);
-            setSelectedAgent(null);
-          }}
-        />
-      )}
-
-      {/* Create Agent Modal */}
-      <Modal
-        visible={showCreateModal}
-        onClose={() => setShowCreateModal(false)}
-        title="Create New Agent"
-        subtitle="Deploy a new AI trading strategy"
-        primaryAction={{ label: "Coming Soon", onPress: () => setShowCreateModal(false) }}
-        secondaryAction={{ label: "Cancel", onPress: () => setShowCreateModal(false) }}
-        size="md"
-      >
-        <View style={{ gap: 16 }}>
-          <View
-            style={{
-              backgroundColor: Colors.accentBg,
-              borderRadius: 16,
-              padding: 16,
-              alignItems: "center",
-              gap: 8,
-            }}
-          >
-            <Ionicons name="hardware-chip-outline" size={40} color={Colors.accentLight} />
-            <Text style={{ color: colors.text, fontWeight: "700", fontSize: 16, textAlign: "center" }}>
-              Agent Builder
-            </Text>
-            <Text style={{ color: colors.textSecondary, fontSize: 14, textAlign: "center", lineHeight: 20 }}>
-              Choose a strategy, configure risk settings, and deploy your agent in minutes.
-            </Text>
-          </View>
-          {["Trend Following", "Mean Reversion", "News-Driven", "Scalping"].map((s) => (
-            <Pressable
-              key={s}
-              style={{
-                flexDirection: "row",
-                alignItems: "center",
-                justifyContent: "space-between",
-                padding: 14,
-                backgroundColor: colors.cardSecondary,
-                borderRadius: 12,
-                borderWidth: 1,
-                borderColor: colors.cardBorder,
-              }}
-            >
-              <Text style={{ color: colors.text, fontWeight: "600", fontSize: 15 }}>{s}</Text>
-              <Ionicons name="chevron-forward" size={18} color={colors.textTertiary} />
-            </Pressable>
-          ))}
-        </View>
-      </Modal>
+      {/* Deploy Sheet */}
+      <DeploySheet
+        visible={showDeploy}
+        onClose={() => setShowDeploy(false)}
+        onDeployed={() => {
+          setShowDeploy(false);
+          if (authUser?.id) loadAgents(authUser.id);
+        }}
+      />
     </SafeAreaView>
   );
 }
@@ -238,6 +224,8 @@ function AgentCard({
 }) {
   const sb = STATUS_BADGES[agent.status];
   const canToggle = agent.status === "active" || agent.status === "paused";
+  const strategyDef = STRATEGIES.find((s) => s.id === (agent.strategy as StrategyId));
+  const riskConfig = strategyDef ? RISK_CONFIG[strategyDef.risk] : null;
 
   return (
     <PressableCard onPress={onPress}>
@@ -245,15 +233,15 @@ function AgentCard({
       <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 12, marginBottom: 14 }}>
         <View
           style={{
-            width: 48,
-            height: 48,
-            borderRadius: 14,
-            backgroundColor: Colors.accentBg,
+            width: 50,
+            height: 50,
+            borderRadius: 15,
+            backgroundColor: colors.cardSecondary,
             alignItems: "center",
             justifyContent: "center",
           }}
         >
-          <Ionicons name="hardware-chip-outline" size={24} color={Colors.accentLight} />
+          <Text style={{ fontSize: 26 }}>{strategyDef?.icon ?? "🤖"}</Text>
         </View>
 
         <View style={{ flex: 1, gap: 4 }}>
@@ -261,11 +249,17 @@ function AgentCard({
             {agent.name}
           </Text>
           <Text style={{ color: colors.textSecondary, fontSize: 13 }}>
-            {agent.strategy}
+            {strategyDef?.name ?? agent.strategy}
           </Text>
-          <View style={{ flexDirection: "row", gap: 6, marginTop: 2 }}>
+          <View style={{ flexDirection: "row", gap: 6, marginTop: 2, flexWrap: "wrap" }}>
             <Badge label={sb.label} variant={sb.variant} />
-            <Badge label={agent.mode} variant={agent.mode === "live" ? "live" : "paper"} dot />
+            <Badge label={agent.mode === "live" ? "Live" : "Paper"} variant={agent.mode === "live" ? "live" : "paper"} dot />
+            {riskConfig && (
+              <Badge
+                label={riskConfig.label}
+                variant={strategyDef?.risk === "low" ? "success" : strategyDef?.risk === "medium" ? "warning" : "danger"}
+              />
+            )}
           </View>
         </View>
 
@@ -296,6 +290,7 @@ function AgentCard({
 
       {/* Stats Row */}
       <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+        <StatMini label="Budget" value={formatCurrency(agent.budget)} colors={colors} />
         <StatMini label="Trades" value={`${agent.trades}`} colors={colors} />
         <StatMini
           label="Win Rate"
@@ -340,6 +335,20 @@ function AgentCard({
           </Text>
         </View>
       )}
+
+      {/* View Detail Hint */}
+      <View
+        style={{
+          marginTop: 10,
+          flexDirection: "row",
+          alignItems: "center",
+          justifyContent: "flex-end",
+          gap: 4,
+        }}
+      >
+        <Text style={{ color: colors.textTertiary, fontSize: 12 }}>View details</Text>
+        <Ionicons name="chevron-forward" size={13} color={colors.textTertiary} />
+      </View>
     </PressableCard>
   );
 }
@@ -357,125 +366,26 @@ function StatMini({
 }) {
   return (
     <View style={{ alignItems: "center", gap: 3 }}>
-      <Text style={{ color: colors.textTertiary, fontSize: 11, fontWeight: "600", textTransform: "uppercase", letterSpacing: 0.4 }}>
+      <Text
+        style={{
+          color: colors.textTertiary,
+          fontSize: 10,
+          fontWeight: "600",
+          textTransform: "uppercase",
+          letterSpacing: 0.4,
+        }}
+      >
         {label}
       </Text>
       <Text
         style={{
           color: negative && value !== "—" ? Colors.danger : colors.text,
           fontWeight: "700",
-          fontSize: 15,
+          fontSize: 14,
         }}
       >
         {value}
       </Text>
     </View>
-  );
-}
-
-function AgentDetailModal({
-  agent,
-  onClose,
-  colors,
-  onToggle,
-}: {
-  agent: Agent;
-  onClose: () => void;
-  colors: any;
-  onToggle: () => void;
-}) {
-  const canToggle = agent.status === "active" || agent.status === "paused";
-  const sb = STATUS_BADGES[agent.status];
-
-  return (
-    <Modal
-      visible
-      onClose={onClose}
-      title={agent.name}
-      subtitle={agent.strategy}
-      size="lg"
-      primaryAction={
-        canToggle
-          ? {
-              label: agent.status === "active" ? "Pause Agent" : "Resume Agent",
-              onPress: onToggle,
-            }
-          : undefined
-      }
-      secondaryAction={{ label: "Close", onPress: onClose }}
-    >
-      {/* Status + Mode */}
-      <View style={{ flexDirection: "row", gap: 8 }}>
-        <Badge label={sb.label} variant={sb.variant} size="md" />
-        <Badge
-          label={agent.mode === "live" ? "Live Trading" : "Paper Mode"}
-          variant={agent.mode === "live" ? "live" : "paper"}
-          size="md"
-          dot
-        />
-      </View>
-
-      {/* Description */}
-      <Text style={{ color: colors.textSecondary, fontSize: 15, lineHeight: 22 }}>
-        {agent.description}
-      </Text>
-
-      {/* P&L Card */}
-      <View
-        style={{
-          backgroundColor: agent.pnl >= 0 ? Colors.successBg : Colors.dangerBg,
-          borderRadius: 16,
-          padding: 16,
-          gap: 4,
-        }}
-      >
-        <Text style={{ color: colors.textSecondary, fontSize: 12, fontWeight: "600", textTransform: "uppercase" }}>
-          Total P&L
-        </Text>
-        <Text
-          style={{
-            color: agent.pnl >= 0 ? Colors.success : Colors.danger,
-            fontSize: 32,
-            fontWeight: "800",
-          }}
-        >
-          {formatCurrency(agent.pnl)}
-        </Text>
-        <Text style={{ color: agent.pnl >= 0 ? Colors.success : Colors.danger, fontSize: 14, fontWeight: "600" }}>
-          {formatPercent(agent.pnlPct)} return
-        </Text>
-      </View>
-
-      {/* Stats Grid */}
-      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10 }}>
-        {[
-          { label: "Total Trades", value: `${agent.trades}` },
-          { label: "Win Rate", value: agent.status === "backtesting" ? "—" : `${agent.winRate}%` },
-          { label: "Max Drawdown", value: agent.status === "backtesting" ? "—" : `${agent.maxDrawdown}%` },
-          { label: "Sharpe Ratio", value: agent.status === "backtesting" ? "—" : `${agent.sharpeRatio}` },
-        ].map((s) => (
-          <View
-            key={s.label}
-            style={{
-              flex: 1,
-              minWidth: "45%",
-              backgroundColor: colors.cardSecondary,
-              borderRadius: 12,
-              padding: 14,
-              gap: 4,
-            }}
-          >
-            <Text style={{ color: colors.textTertiary, fontSize: 11, fontWeight: "600", textTransform: "uppercase" }}>
-              {s.label}
-            </Text>
-            <Text style={{ color: colors.text, fontWeight: "800", fontSize: 20 }}>{s.value}</Text>
-          </View>
-        ))}
-      </View>
-
-      <Text style={{ color: colors.textTertiary, fontSize: 12, textAlign: "center" }}>
-        Created {agent.createdAt}
-      </Text>
-    </Modal>
   );
 }

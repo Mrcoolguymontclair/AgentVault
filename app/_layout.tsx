@@ -123,6 +123,10 @@ function AppLoader() {
           options={{ animation: "fade", gestureEnabled: false }}
         />
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+        <Stack.Screen
+          name="agent/[id]"
+          options={{ headerShown: false, animation: "slide_from_right" }}
+        />
       </Stack>
       <OfflineBanner />
     </>

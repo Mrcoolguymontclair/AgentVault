@@ -3,12 +3,16 @@ import {
   fetchUserAgents,
   fetchRecentTrades,
   updateAgentStatus,
+  createAgent as createAgentService,
+  deleteAgent as deleteAgentService,
   subscribeToTrades,
   subscribeToAgents,
   type DbAgent,
   type DbTrade,
+  type CreateAgentInput,
 } from "@/lib/services/agentService";
 import type { RealtimeChannel } from "@supabase/supabase-js";
+import type { ModelId, StrategyId } from "@/constants/strategies";
 
 export type AgentStatus = "active" | "paused" | "stopped" | "backtesting";
 export type AgentMode = "paper" | "live";
@@ -16,7 +20,7 @@ export type AgentMode = "paper" | "live";
 export interface Agent {
   id: string;
   name: string;
-  strategy: string;
+  strategy: StrategyId;
   status: AgentStatus;
   pnl: number;
   pnlPct: number;
@@ -27,6 +31,10 @@ export interface Agent {
   description: string;
   maxDrawdown: number;
   sharpeRatio: number;
+  config: Record<string, number>;
+  budget: number;
+  isPrivate: boolean;
+  modelId: ModelId;
 }
 
 export interface Trade {
@@ -45,7 +53,7 @@ function dbAgentToAgent(a: DbAgent): Agent {
   return {
     id: a.id,
     name: a.name,
-    strategy: a.strategy,
+    strategy: a.strategy as StrategyId,
     status: a.status,
     pnl: Number(a.pnl),
     pnlPct: Number(a.pnl_pct),
@@ -60,6 +68,10 @@ function dbAgentToAgent(a: DbAgent): Agent {
     description: a.description,
     maxDrawdown: Number(a.max_drawdown),
     sharpeRatio: Number(a.sharpe_ratio),
+    config: a.config ?? {},
+    budget: Number(a.budget ?? 1000),
+    isPrivate: a.is_private ?? false,
+    modelId: (a.model_id as ModelId) ?? "groq_llama",
   };
 }
 
@@ -88,6 +100,8 @@ interface AgentStore {
   setAgents: (agents: Agent[]) => void;
   selectAgent: (agent: Agent | null) => void;
   toggleAgent: (id: string) => Promise<void>;
+  createAgent: (userId: string, input: CreateAgentInput) => Promise<{ agent: Agent | null; error: string | null }>;
+  deleteAgent: (id: string) => Promise<{ error: string | null }>;
   setLoading: (loading: boolean) => void;
   addTrade: (trade: Trade) => void;
   startRealtimeSubscriptions: (userId: string) => void;
@@ -136,22 +150,38 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     if (!agent) return;
     const newStatus: AgentStatus = agent.status === "active" ? "paused" : "active";
 
-    // Optimistic update
     set({
-      agents: agents.map((a) =>
-        a.id === id ? { ...a, status: newStatus } : a
-      ),
+      agents: agents.map((a) => (a.id === id ? { ...a, status: newStatus } : a)),
     });
 
     const { error } = await updateAgentStatus(id, newStatus);
     if (error) {
-      // Revert on error
       set({
-        agents: agents.map((a) =>
-          a.id === id ? { ...a, status: agent.status } : a
-        ),
+        agents: agents.map((a) => (a.id === id ? { ...a, status: agent.status } : a)),
       });
     }
+  },
+
+  createAgent: async (userId, input) => {
+    const { data, error } = await createAgentService(userId, input);
+    if (error || !data) return { agent: null, error: error ?? "Failed to create agent" };
+
+    const agent = dbAgentToAgent(data);
+    set((state) => ({ agents: [agent, ...state.agents] }));
+    return { agent, error: null };
+  },
+
+  deleteAgent: async (id) => {
+    // Optimistic remove
+    const prev = get().agents;
+    set((state) => ({ agents: state.agents.filter((a) => a.id !== id) }));
+
+    const { error } = await deleteAgentService(id);
+    if (error) {
+      set({ agents: prev });
+      return { error };
+    }
+    return { error: null };
   },
 
   startRealtimeSubscriptions: (userId) => {
