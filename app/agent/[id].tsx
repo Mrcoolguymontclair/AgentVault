@@ -6,6 +6,7 @@ import {
   Pressable,
   Alert,
   ActivityIndicator,
+  Share,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
@@ -28,6 +29,7 @@ import { Card } from "@/components/ui/Card";
 import { STRATEGIES, RISK_CONFIG, AI_MODELS } from "@/constants/strategies";
 import type { StrategyId, ModelId } from "@/constants/strategies";
 import type { Agent } from "@/store/agentStore";
+import { CommentSection } from "@/components/social/CommentSection";
 
 const STATUS_BADGES: Record<string, { variant: any; label: string }> = {
   active: { variant: "success", label: "Active" },
@@ -180,6 +182,20 @@ export default function AgentDetailScreen() {
     }
   }, [agent]);
 
+  const handleShare = useCallback(async () => {
+    if (!agent) return;
+    const strategyDef = STRATEGIES.find((s) => s.id === (agent.strategy as StrategyId));
+    const sign = agent.pnl >= 0 ? "+" : "";
+    const message =
+      `🤖 ${agent.name} — AgentVault\n` +
+      `Strategy: ${strategyDef?.name ?? agent.strategy}\n` +
+      `Return: ${sign}${agent.pnlPct.toFixed(2)}%\n` +
+      `P&L: ${sign}$${agent.pnl.toFixed(2)}\n` +
+      `Trades: ${agent.trades} · Win Rate: ${agent.winRate}%\n\n` +
+      `Track AI trading agents on AgentVault`;
+    await Share.share({ message });
+  }, [agent]);
+
   const handleFollow = useCallback(async () => {
     if (!authUser?.id || !agent) return;
     const nextFollowing = !isFollowing;
@@ -266,6 +282,19 @@ export default function AgentDetailScreen() {
 
         {/* Right-side actions */}
         <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
+          {/* Share button — always visible */}
+          <Pressable
+            onPress={handleShare}
+            hitSlop={12}
+            style={{
+              width: 38, height: 38, borderRadius: 12,
+              backgroundColor: colors.card, borderWidth: 1, borderColor: colors.cardBorder,
+              alignItems: "center", justifyContent: "center",
+            }}
+          >
+            <Ionicons name="share-outline" size={18} color={colors.text} />
+          </Pressable>
+
           {isOwnAgent && (
             <>
               <Pressable
@@ -505,6 +534,11 @@ export default function AgentDetailScreen() {
           ) : (
             trades.map((trade) => <TradeRow key={trade.id} trade={trade} colors={colors} />)
           )}
+        </View>
+
+        {/* Comments */}
+        <View style={{ paddingTop: 4 }}>
+          <CommentSection agentId={agent.id} />
         </View>
       </ScrollView>
     </SafeAreaView>
