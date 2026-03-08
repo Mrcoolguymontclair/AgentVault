@@ -6,6 +6,8 @@ import {
   Pressable,
   Switch,
   Platform,
+  Share,
+  Alert,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -15,33 +17,107 @@ import { useAuthStore } from "@/store/authStore";
 import { useAgentStore } from "@/store/agentStore";
 import { useNotificationStore } from "@/store/notificationStore";
 import { router } from "expo-router";
-import { Card, PressableCard } from "@/components/ui/Card";
+import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { Colors } from "@/constants/colors";
+import { supabase } from "@/lib/supabase";
+
+type Plan = "free" | "pro" | "elite";
+
+const PLAN_LABELS: Record<Plan, string> = {
+  free: "Free",
+  pro: "Pro",
+  elite: "Pro+",
+};
+
+const PLAN_BADGE_VARIANT: Record<Plan, "neutral" | "accent" | "warning"> = {
+  free: "neutral",
+  pro: "accent",
+  elite: "warning",
+};
 
 export default function SettingsScreen() {
-  const { colors, isDark, toggleTheme, theme } = useTheme();
+  const { colors, isDark, toggleTheme } = useTheme();
   const { user } = useUserStore();
   const { signOut, user: authUser } = useAuthStore();
   const { agents } = useAgentStore();
   const { preferences, unreadCount, updatePreferences } = useNotificationStore();
-  const [showApiModal, setShowApiModal] = useState(false);
-  const [showPlanModal, setShowPlanModal] = useState(false);
   const [showSignOutModal, setShowSignOutModal] = useState(false);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
+
+  const plan = ((authUser?.user_metadata?.plan as Plan) ?? "free");
+  const planLabel = PLAN_LABELS[plan] ?? "Free";
+  const planBadgeVariant = PLAN_BADGE_VARIANT[plan] ?? "neutral";
 
   async function confirmSignOut() {
     setShowSignOutModal(false);
     await signOut();
-    // AuthRouter in _layout.tsx redirects to /auth/login when session clears
+  }
+
+  async function handleExport() {
+    if (!authUser?.id) return;
+    setIsExporting(true);
+    try {
+      const { data, error } = await supabase.rpc("rpc_export_trades", {
+        p_user_id: authUser.id,
+      });
+      setIsExporting(false);
+      if (error) throw error;
+
+      const trades = (data as any[]) ?? [];
+      if (trades.length === 0) {
+        Alert.alert("No Trades", "You don't have any trades to export yet.");
+        return;
+      }
+
+      // Build CSV string
+      const header = "id,agent_id,agent_name,symbol,side,qty,price,pnl,created_at";
+      const rows = trades.map((t: any) =>
+        [t.id, t.agent_id, `"${t.agent_name}"`, t.symbol, t.side, t.qty, t.price, t.pnl, t.created_at].join(",")
+      );
+      const csv = [header, ...rows].join("\n");
+
+      await Share.share({
+        title: "AgentVault Trade History",
+        message: csv,
+      });
+    } catch (e: any) {
+      setIsExporting(false);
+      Alert.alert("Export Failed", e?.message ?? "Could not export trade history.");
+    }
+  }
+
+  async function handleDeleteAccount() {
+    if (!authUser?.id) return;
+    setIsDeleting(true);
+    try {
+      await supabase.rpc("rpc_delete_account", { p_user_id: authUser.id });
+      await signOut();
+    } catch (e: any) {
+      setIsDeleting(false);
+      Alert.alert("Error", e?.message ?? "Failed to delete account. Please try again.");
+    }
+  }
+
+  async function handleInvite() {
+    try {
+      await Share.share({
+        title: "Join AgentVault",
+        message:
+          "I'm using AgentVault to trade with AI agents. Download it and join the leaderboard! https://agentvault.app",
+      });
+    } catch {}
   }
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
       <ScrollView
         showsVerticalScrollIndicator={false}
-        contentContainerStyle={{ paddingBottom: 32 }}
+        contentContainerStyle={{ paddingBottom: 40 }}
       >
         {/* Header */}
         <View style={{ paddingHorizontal: 16, paddingTop: 8, paddingBottom: 20 }}>
@@ -52,26 +128,14 @@ export default function SettingsScreen() {
 
         {/* Profile Card */}
         <View style={{ paddingHorizontal: 16, marginBottom: 24 }}>
-          <PressableCard style={{ borderWidth: 0, padding: 0, overflow: "hidden" }}>
+          <View style={{ borderRadius: 16, overflow: "hidden", borderWidth: 1, borderColor: colors.cardBorder }}>
             {/* Purple header bar */}
-            <View
-              style={{
-                height: 64,
-                backgroundColor: Colors.accent,
-                borderTopLeftRadius: 15,
-                borderTopRightRadius: 15,
-              }}
-            />
+            <View style={{ height: 64, backgroundColor: Colors.accent }} />
             <View
               style={{
                 padding: 16,
                 paddingTop: 0,
                 backgroundColor: colors.card,
-                borderBottomLeftRadius: 15,
-                borderBottomRightRadius: 15,
-                borderWidth: 1,
-                borderTopWidth: 0,
-                borderColor: colors.cardBorder,
               }}
             >
               {/* Avatar */}
@@ -89,21 +153,21 @@ export default function SettingsScreen() {
                   }}
                 >
                   <Text style={{ fontSize: 28 }}>
-                    {authUser?.user_metadata?.avatar || "🚀"}
+                    {authUser?.user_metadata?.avatar ?? "🚀"}
                   </Text>
                 </View>
               </View>
 
               <View style={{ flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between" }}>
-                <View style={{ gap: 4 }}>
+                <View style={{ gap: 4, flex: 1 }}>
                   <Text style={{ color: colors.text, fontWeight: "800", fontSize: 20 }}>
-                    {authUser?.user_metadata?.display_name || user?.name}
+                    {authUser?.user_metadata?.display_name ?? user?.name ?? "Trader"}
                   </Text>
                   <Text style={{ color: colors.textSecondary, fontSize: 13 }}>
-                    {authUser?.email || user?.email}
+                    {authUser?.email ?? user?.email}
                   </Text>
                   <View style={{ flexDirection: "row", alignItems: "center", gap: 8, marginTop: 4 }}>
-                    <Badge label="Free Plan" variant="neutral" size="sm" />
+                    <Badge label={`${planLabel} Plan`} variant={planBadgeVariant} size="sm" />
                     {authUser?.created_at && (
                       <Text style={{ color: colors.textTertiary, fontSize: 12 }}>
                         Since {new Date(authUser.created_at).toLocaleDateString("en-US", { month: "short", year: "numeric" })}
@@ -113,6 +177,7 @@ export default function SettingsScreen() {
                 </View>
 
                 <Pressable
+                  onPress={() => router.push("/profile-edit" as any)}
                   style={{
                     backgroundColor: colors.cardSecondary,
                     borderRadius: 10,
@@ -126,7 +191,7 @@ export default function SettingsScreen() {
               </View>
 
               {/* Stats */}
-              <View style={{ flexDirection: "row", gap: 0, marginTop: 16 }}>
+              <View style={{ flexDirection: "row", marginTop: 16 }}>
                 {[
                   { label: "Agents", value: `${agents.length}` },
                   { label: "Active", value: `${agents.filter(a => a.status === "active").length}` },
@@ -142,17 +207,13 @@ export default function SettingsScreen() {
                       paddingVertical: 4,
                     }}
                   >
-                    <Text style={{ color: colors.text, fontWeight: "800", fontSize: 18 }}>
-                      {s.value}
-                    </Text>
-                    <Text style={{ color: colors.textTertiary, fontSize: 11, fontWeight: "600" }}>
-                      {s.label}
-                    </Text>
+                    <Text style={{ color: colors.text, fontWeight: "800", fontSize: 18 }}>{s.value}</Text>
+                    <Text style={{ color: colors.textTertiary, fontSize: 11, fontWeight: "600" }}>{s.label}</Text>
                   </View>
                 ))}
               </View>
             </View>
-          </PressableCard>
+          </View>
         </View>
 
         <View style={{ paddingHorizontal: 16, gap: 20 }}>
@@ -176,36 +237,50 @@ export default function SettingsScreen() {
             />
           </SettingsSection>
 
-          {/* Plan */}
+          {/* Subscription */}
           <SettingsSection title="Subscription" colors={colors}>
             <SettingsRow
               icon="star-outline"
               iconBg="rgba(108,92,231,0.12)"
               iconColor={Colors.accentLight}
-              label="Pro Plan"
-              subtitle="5 agents · Live trading · Priority support"
+              label={plan === "elite" ? "Pro+ Plan" : plan === "pro" ? "Pro Plan" : "Free Plan"}
+              subtitle={
+                plan === "elite"
+                  ? "20 agents · All models · Live trading"
+                  : plan === "pro"
+                  ? "5 agents · Claude Haiku · Priority support"
+                  : "1 agent · Groq Llama · Paper trading"
+              }
               colors={colors}
               right={
-                <Pressable
-                  onPress={() => setShowPlanModal(true)}
-                  style={{
-                    backgroundColor: Colors.accentBg,
-                    paddingHorizontal: 12,
-                    paddingVertical: 6,
-                    borderRadius: 8,
-                  }}
-                >
-                  <Text style={{ color: Colors.accentLight, fontWeight: "700", fontSize: 13 }}>
-                    Upgrade
-                  </Text>
-                </Pressable>
+                plan !== "elite" ? (
+                  <Pressable
+                    onPress={() => router.push("/subscription" as any)}
+                    style={{
+                      backgroundColor: Colors.accentBg,
+                      paddingHorizontal: 12,
+                      paddingVertical: 6,
+                      borderRadius: 8,
+                    }}
+                  >
+                    <Text style={{ color: Colors.accentLight, fontWeight: "700", fontSize: 13 }}>
+                      Upgrade
+                    </Text>
+                  </Pressable>
+                ) : (
+                  <Pressable
+                    onPress={() => router.push("/subscription" as any)}
+                    hitSlop={8}
+                  >
+                    <Ionicons name="chevron-forward" size={16} color={colors.textTertiary} />
+                  </Pressable>
+                )
               }
             />
           </SettingsSection>
 
           {/* Notifications */}
           <SettingsSection title="Notifications" colors={colors}>
-            {/* Notification Center shortcut */}
             <SettingsRow
               icon="notifications-outline"
               iconBg="rgba(108,92,231,0.12)"
@@ -213,12 +288,12 @@ export default function SettingsScreen() {
               label="Notification Center"
               subtitle={unreadCount > 0 ? `${unreadCount} unread` : "View all notifications"}
               colors={colors}
-              onPress={() => router.push("/notifications")}
+              onPress={() => router.push("/notifications" as any)}
               chevron
             />
             {Platform.OS !== "web" && (
               <>
-                <View style={{ height: 1, backgroundColor: colors.divider, marginVertical: 4 }} />
+                <Divider colors={colors} />
                 <SettingsRow
                   icon="flash-outline"
                   iconBg="rgba(0,214,143,0.12)"
@@ -236,7 +311,7 @@ export default function SettingsScreen() {
                     />
                   }
                 />
-                <View style={{ height: 1, backgroundColor: colors.divider, marginVertical: 4 }} />
+                <Divider colors={colors} />
                 <SettingsRow
                   icon="shield-checkmark-outline"
                   iconBg="rgba(255,107,107,0.12)"
@@ -254,7 +329,7 @@ export default function SettingsScreen() {
                     />
                   }
                 />
-                <View style={{ height: 1, backgroundColor: colors.divider, marginVertical: 4 }} />
+                <Divider colors={colors} />
                 <SettingsRow
                   icon="people-outline"
                   iconBg="rgba(0,214,143,0.12)"
@@ -272,7 +347,7 @@ export default function SettingsScreen() {
                     />
                   }
                 />
-                <View style={{ height: 1, backgroundColor: colors.divider, marginVertical: 4 }} />
+                <Divider colors={colors} />
                 <SettingsRow
                   icon="bar-chart-outline"
                   iconBg="rgba(255,212,59,0.12)"
@@ -294,16 +369,57 @@ export default function SettingsScreen() {
             )}
           </SettingsSection>
 
-          {/* API Keys */}
-          <SettingsSection title="Integrations" colors={colors}>
+          {/* Trading / Integrations */}
+          <SettingsSection title="Trading" colors={colors}>
             <SettingsRow
-              icon="key-outline"
+              icon="trending-up-outline"
               iconBg="rgba(255,169,77,0.12)"
               iconColor={Colors.warning}
-              label="API Keys"
-              subtitle="Alpaca, Groq, Supabase"
+              label="Alpaca API Keys"
+              subtitle="Connect for live trading"
               colors={colors}
-              onPress={() => setShowApiModal(true)}
+              onPress={() => router.push("/alpaca-setup" as any)}
+              chevron
+            />
+          </SettingsSection>
+
+          {/* Account */}
+          <SettingsSection title="Account" colors={colors}>
+            <SettingsRow
+              icon="share-social-outline"
+              iconBg="rgba(0,214,143,0.12)"
+              iconColor={Colors.success}
+              label="Invite a Friend"
+              subtitle="Share AgentVault with others"
+              colors={colors}
+              onPress={handleInvite}
+              chevron
+            />
+            <Divider colors={colors} />
+            <SettingsRow
+              icon="download-outline"
+              iconBg="rgba(108,92,231,0.12)"
+              iconColor={Colors.accentLight}
+              label={isExporting ? "Exporting..." : "Export Trade History"}
+              subtitle="Download as CSV"
+              colors={colors}
+              onPress={plan === "free" ? () => {
+                Alert.alert("Pro Feature", "Trade history export is available on Pro and Pro+ plans.", [
+                  { text: "View Plans", onPress: () => router.push("/subscription" as any) },
+                  { text: "Cancel", style: "cancel" },
+                ]);
+              } : handleExport}
+              chevron
+            />
+            <Divider colors={colors} />
+            <SettingsRow
+              icon="trash-outline"
+              iconBg="rgba(255,107,107,0.12)"
+              iconColor={Colors.danger}
+              label="Delete Account"
+              subtitle="Permanently remove all data"
+              colors={colors}
+              onPress={() => setShowDeleteModal(true)}
               chevron
             />
           </SettingsSection>
@@ -317,7 +433,7 @@ export default function SettingsScreen() {
               { icon: "shield-outline" as const, label: "Privacy Policy", iconColor: colors.textSecondary, iconBg: colors.cardSecondary },
             ].map((item, i) => (
               <React.Fragment key={item.label}>
-                {i > 0 && <View style={{ height: 1, backgroundColor: colors.divider, marginVertical: 4 }} />}
+                {i > 0 && <Divider colors={colors} />}
                 <SettingsRow
                   icon={item.icon}
                   iconBg={item.iconBg}
@@ -352,67 +468,7 @@ export default function SettingsScreen() {
         </View>
       </ScrollView>
 
-      {/* API Keys Modal */}
-      <Modal
-        visible={showApiModal}
-        onClose={() => setShowApiModal(false)}
-        title="API Keys"
-        subtitle="Connected integrations"
-        size="lg"
-        secondaryAction={{ label: "Close", onPress: () => setShowApiModal(false) }}
-      >
-        <Text style={{ color: colors.textSecondary, fontSize: 14, lineHeight: 20 }}>
-          Your API keys are securely stored and encrypted. Never share them with anyone.
-        </Text>
-
-        {[
-          {
-            name: "Alpaca Markets",
-            icon: "📈",
-            status: "connected",
-            description: "Paper trading enabled · Live trading ready",
-          },
-          {
-            name: "Groq AI",
-            icon: "🤖",
-            status: "connected",
-            description: "LLM inference for agent decisions",
-          },
-          {
-            name: "Supabase",
-            icon: "🗄️",
-            status: "connected",
-            description: "Database and real-time subscriptions",
-          },
-        ].map((api) => (
-          <View
-            key={api.name}
-            style={{
-              flexDirection: "row",
-              alignItems: "center",
-              gap: 12,
-              padding: 14,
-              backgroundColor: colors.cardSecondary,
-              borderRadius: 12,
-              borderWidth: 1,
-              borderColor: colors.cardBorder,
-            }}
-          >
-            <Text style={{ fontSize: 24 }}>{api.icon}</Text>
-            <View style={{ flex: 1, gap: 2 }}>
-              <Text style={{ color: colors.text, fontWeight: "700", fontSize: 15 }}>
-                {api.name}
-              </Text>
-              <Text style={{ color: colors.textSecondary, fontSize: 12 }}>
-                {api.description}
-              </Text>
-            </View>
-            <Badge label="Connected" variant="success" dot />
-          </View>
-        ))}
-      </Modal>
-
-      {/* Sign Out Confirmation Modal */}
+      {/* Sign Out Modal */}
       <Modal
         visible={showSignOutModal}
         onClose={() => setShowSignOutModal(false)}
@@ -434,62 +490,34 @@ export default function SettingsScreen() {
         </Text>
       </Modal>
 
-      {/* Plan Modal */}
+      {/* Delete Account Modal */}
       <Modal
-        visible={showPlanModal}
-        onClose={() => setShowPlanModal(false)}
-        title="Upgrade Plan"
-        subtitle="Unlock the full power of AgentVault"
-        size="lg"
-        primaryAction={{ label: "Upgrade to Elite", onPress: () => setShowPlanModal(false) }}
-        secondaryAction={{ label: "Maybe Later", onPress: () => setShowPlanModal(false) }}
+        visible={showDeleteModal}
+        onClose={() => setShowDeleteModal(false)}
+        title="Delete Account"
+        subtitle="This action cannot be undone"
+        size="md"
+        primaryAction={{
+          label: isDeleting ? "Deleting..." : "Delete Account",
+          onPress: handleDeleteAccount,
+          destructive: true,
+        }}
+        secondaryAction={{
+          label: "Cancel",
+          onPress: () => setShowDeleteModal(false),
+        }}
       >
-        {[
-          {
-            name: "Pro",
-            price: "$29/mo",
-            color: Colors.accentLight,
-            bg: Colors.accentBg,
-            features: ["5 active agents", "Live trading", "Priority support", "Weekly reports"],
-            current: true,
-          },
-          {
-            name: "Elite",
-            price: "$79/mo",
-            color: Colors.gold,
-            bg: "rgba(255,212,59,0.12)",
-            features: ["Unlimited agents", "Live & paper trading", "24/7 support", "Custom strategies", "Early access features"],
-            current: false,
-          },
-        ].map((plan) => (
-          <View
-            key={plan.name}
-            style={{
-              borderRadius: 16,
-              padding: 16,
-              backgroundColor: plan.bg,
-              borderWidth: plan.current ? 1.5 : 1,
-              borderColor: plan.current ? plan.color : colors.cardBorder,
-              gap: 10,
-            }}
-          >
-            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-              <Text style={{ color: colors.text, fontWeight: "800", fontSize: 18 }}>{plan.name}</Text>
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                {plan.current && <Badge label="Current" variant="accent" size="sm" />}
-                <Text style={{ color: plan.color, fontWeight: "800", fontSize: 18 }}>{plan.price}</Text>
-              </View>
-            </View>
-            {plan.features.map((f) => (
-              <View key={f} style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                <Ionicons name="checkmark-circle" size={16} color={plan.color} />
-                <Text style={{ color: colors.textSecondary, fontSize: 14 }}>{f}</Text>
-              </View>
-            ))}
-          </View>
-        ))}
+        <Text style={{ color: colors.textSecondary, fontSize: 14, lineHeight: 20 }}>
+          All your agents, trades, and profile data will be permanently deleted. This cannot be reversed.
+        </Text>
       </Modal>
     </SafeAreaView>
+  );
+}
+
+function Divider({ colors }: { colors: any }) {
+  return (
+    <View style={{ height: 1, backgroundColor: colors.divider, marginVertical: 4 }} />
   );
 }
 
@@ -578,7 +606,7 @@ function SettingsRow({
       </View>
 
       {right}
-      {chevron && (
+      {chevron && !right && (
         <Ionicons name="chevron-forward" size={16} color={colors.textTertiary} />
       )}
     </Pressable>

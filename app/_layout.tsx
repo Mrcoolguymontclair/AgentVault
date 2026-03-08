@@ -42,7 +42,10 @@ function AuthRouter() {
     const inOnboarding = seg0 === "onboarding";
     const inTabs = seg0 === "(tabs)";
     // Deep routes (agent detail, trader profile) — don't touch these
-    const inDeepRoute = seg0 === "agent" || seg0 === "trader";
+    const inDeepRoute =
+      seg0 === "agent" || seg0 === "trader" ||
+      seg0 === "notifications" || seg0 === "subscription" ||
+      seg0 === "profile-edit" || seg0 === "alpaca-setup";
 
     if (!session) {
       if (!inAuth) router.replace("/auth/login");
@@ -259,6 +262,27 @@ function AppLoader() {
         />
         <Stack.Screen
           name="notifications"
+          options={{
+            headerShown: false,
+            animation: Platform.OS === "web" ? "none" : "slide_from_right",
+          }}
+        />
+        <Stack.Screen
+          name="subscription"
+          options={{
+            headerShown: false,
+            animation: Platform.OS === "web" ? "none" : "slide_from_right",
+          }}
+        />
+        <Stack.Screen
+          name="profile-edit"
+          options={{
+            headerShown: false,
+            animation: Platform.OS === "web" ? "none" : "slide_from_right",
+          }}
+        />
+        <Stack.Screen
+          name="alpaca-setup"
           options={{
             headerShown: false,
             animation: Platform.OS === "web" ? "none" : "slide_from_right",

@@ -10,6 +10,7 @@ import {
   Platform,
   Alert,
 } from "react-native";
+import { router } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTheme } from "@/hooks/useTheme";
@@ -848,7 +849,8 @@ function StepReview({
       contentContainerStyle={{ padding: 20, gap: 16 }}
     >
       {atLimit && (
-        <View
+        <Pressable
+          onPress={() => router.push("/subscription" as any)}
           style={{
             backgroundColor: Colors.dangerBg,
             borderRadius: 14,
@@ -856,13 +858,16 @@ function StepReview({
             flexDirection: "row",
             alignItems: "center",
             gap: 10,
+            borderWidth: 1,
+            borderColor: Colors.danger,
           }}
         >
           <Ionicons name="warning-outline" size={18} color={Colors.danger} />
           <Text style={{ color: Colors.danger, fontSize: 13, fontWeight: "600", flex: 1 }}>
-            Agent limit reached ({tierLimit}/{tierLimit}). Upgrade your plan to deploy more agents.
+            Agent limit reached ({tierLimit}/{tierLimit}). Tap to view upgrade options.
           </Text>
-        </View>
+          <Ionicons name="chevron-forward" size={14} color={Colors.danger} />
+        </Pressable>
       )}
 
       {deployError && (
