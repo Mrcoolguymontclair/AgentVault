@@ -5,6 +5,7 @@ import {
   ScrollView,
   Pressable,
   Switch,
+  Platform,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -12,6 +13,8 @@ import { useTheme } from "@/hooks/useTheme";
 import { useUserStore } from "@/store/userStore";
 import { useAuthStore } from "@/store/authStore";
 import { useAgentStore } from "@/store/agentStore";
+import { useNotificationStore } from "@/store/notificationStore";
+import { router } from "expo-router";
 import { Card, PressableCard } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -23,9 +26,7 @@ export default function SettingsScreen() {
   const { user } = useUserStore();
   const { signOut, user: authUser } = useAuthStore();
   const { agents } = useAgentStore();
-  const [notificationsEnabled, setNotificationsEnabled] = useState(true);
-  const [tradeAlerts, setTradeAlerts] = useState(true);
-  const [weeklyReport, setWeeklyReport] = useState(false);
+  const { preferences, unreadCount, updatePreferences } = useNotificationStore();
   const [showApiModal, setShowApiModal] = useState(false);
   const [showPlanModal, setShowPlanModal] = useState(false);
   const [showSignOutModal, setShowSignOutModal] = useState(false);
@@ -204,58 +205,93 @@ export default function SettingsScreen() {
 
           {/* Notifications */}
           <SettingsSection title="Notifications" colors={colors}>
+            {/* Notification Center shortcut */}
             <SettingsRow
               icon="notifications-outline"
-              iconBg="rgba(0,214,143,0.12)"
-              iconColor={Colors.success}
-              label="Push Notifications"
+              iconBg="rgba(108,92,231,0.12)"
+              iconColor={Colors.accentLight}
+              label="Notification Center"
+              subtitle={unreadCount > 0 ? `${unreadCount} unread` : "View all notifications"}
               colors={colors}
-              right={
-                <Switch
-                  value={notificationsEnabled}
-                  onValueChange={setNotificationsEnabled}
-                  trackColor={{ false: colors.cardBorder, true: Colors.successBg }}
-                  thumbColor={notificationsEnabled ? Colors.success : colors.textTertiary}
-                  ios_backgroundColor={colors.cardBorder}
-                />
-              }
+              onPress={() => router.push("/notifications")}
+              chevron
             />
-            <View style={{ height: 1, backgroundColor: colors.divider, marginVertical: 4 }} />
-            <SettingsRow
-              icon="flash-outline"
-              iconBg="rgba(0,214,143,0.12)"
-              iconColor={Colors.success}
-              label="Trade Alerts"
-              subtitle="Notified on every trade execution"
-              colors={colors}
-              right={
-                <Switch
-                  value={tradeAlerts}
-                  onValueChange={setTradeAlerts}
-                  trackColor={{ false: colors.cardBorder, true: Colors.successBg }}
-                  thumbColor={tradeAlerts ? Colors.success : colors.textTertiary}
-                  ios_backgroundColor={colors.cardBorder}
+            {Platform.OS !== "web" && (
+              <>
+                <View style={{ height: 1, backgroundColor: colors.divider, marginVertical: 4 }} />
+                <SettingsRow
+                  icon="flash-outline"
+                  iconBg="rgba(0,214,143,0.12)"
+                  iconColor={Colors.success}
+                  label="My Trade Alerts"
+                  subtitle="Every time your agents execute"
+                  colors={colors}
+                  right={
+                    <Switch
+                      value={preferences.my_trades}
+                      onValueChange={(v) => { if (authUser?.id) updatePreferences(authUser.id, { my_trades: v }); }}
+                      trackColor={{ false: colors.cardBorder, true: Colors.successBg }}
+                      thumbColor={preferences.my_trades ? Colors.success : colors.textTertiary}
+                      ios_backgroundColor={colors.cardBorder}
+                    />
+                  }
                 />
-              }
-            />
-            <View style={{ height: 1, backgroundColor: colors.divider, marginVertical: 4 }} />
-            <SettingsRow
-              icon="document-text-outline"
-              iconBg="rgba(0,214,143,0.12)"
-              iconColor={Colors.success}
-              label="Weekly Report"
-              subtitle="Performance summary every Monday"
-              colors={colors}
-              right={
-                <Switch
-                  value={weeklyReport}
-                  onValueChange={setWeeklyReport}
-                  trackColor={{ false: colors.cardBorder, true: Colors.successBg }}
-                  thumbColor={weeklyReport ? Colors.success : colors.textTertiary}
-                  ios_backgroundColor={colors.cardBorder}
+                <View style={{ height: 1, backgroundColor: colors.divider, marginVertical: 4 }} />
+                <SettingsRow
+                  icon="shield-checkmark-outline"
+                  iconBg="rgba(255,107,107,0.12)"
+                  iconColor={Colors.danger}
+                  label="Stop Loss / Take Profit"
+                  subtitle="Risk limit and target alerts"
+                  colors={colors}
+                  right={
+                    <Switch
+                      value={preferences.stop_loss}
+                      onValueChange={(v) => { if (authUser?.id) updatePreferences(authUser.id, { stop_loss: v }); }}
+                      trackColor={{ false: colors.cardBorder, true: Colors.dangerBg }}
+                      thumbColor={preferences.stop_loss ? Colors.danger : colors.textTertiary}
+                      ios_backgroundColor={colors.cardBorder}
+                    />
+                  }
                 />
-              }
-            />
+                <View style={{ height: 1, backgroundColor: colors.divider, marginVertical: 4 }} />
+                <SettingsRow
+                  icon="people-outline"
+                  iconBg="rgba(0,214,143,0.12)"
+                  iconColor={Colors.success}
+                  label="Followed Agents"
+                  subtitle="When agents you follow make trades"
+                  colors={colors}
+                  right={
+                    <Switch
+                      value={preferences.followed_agents}
+                      onValueChange={(v) => { if (authUser?.id) updatePreferences(authUser.id, { followed_agents: v }); }}
+                      trackColor={{ false: colors.cardBorder, true: Colors.successBg }}
+                      thumbColor={preferences.followed_agents ? Colors.success : colors.textTertiary}
+                      ios_backgroundColor={colors.cardBorder}
+                    />
+                  }
+                />
+                <View style={{ height: 1, backgroundColor: colors.divider, marginVertical: 4 }} />
+                <SettingsRow
+                  icon="bar-chart-outline"
+                  iconBg="rgba(255,212,59,0.12)"
+                  iconColor={Colors.gold}
+                  label="Daily P&L Summary"
+                  subtitle="Market close recap at 4:05 PM ET"
+                  colors={colors}
+                  right={
+                    <Switch
+                      value={preferences.daily_summary}
+                      onValueChange={(v) => { if (authUser?.id) updatePreferences(authUser.id, { daily_summary: v }); }}
+                      trackColor={{ false: colors.cardBorder, true: "rgba(255,212,59,0.25)" }}
+                      thumbColor={preferences.daily_summary ? Colors.gold : colors.textTertiary}
+                      ios_backgroundColor={colors.cardBorder}
+                    />
+                  }
+                />
+              </>
+            )}
           </SettingsSection>
 
           {/* API Keys */}

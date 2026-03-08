@@ -6,6 +6,7 @@ import {
   RefreshControl,
   Pressable,
 } from "react-native";
+import { BellButton } from "@/components/notifications/BellButton";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { router } from "expo-router";
@@ -289,20 +290,7 @@ export default function HomeScreen() {
               </Text>
             </View>
 
-            <Pressable
-              style={{
-                width: 38,
-                height: 38,
-                borderRadius: 11,
-                backgroundColor: colors.card,
-                borderWidth: 1,
-                borderColor: colors.cardBorder,
-                alignItems: "center",
-                justifyContent: "center",
-              }}
-            >
-              <Ionicons name="notifications-outline" size={18} color={colors.textSecondary} />
-            </Pressable>
+            <BellButton />
 
             <Pressable
               style={{

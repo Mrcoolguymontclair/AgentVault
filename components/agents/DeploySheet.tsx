@@ -29,6 +29,7 @@ import {
   type Strategy,
 } from "@/constants/strategies";
 import { checkAgentLimit } from "@/lib/services/agentService";
+import { useNotificationStore } from "@/store/notificationStore";
 import type { AgentMode } from "@/store/agentStore";
 
 interface Props {
@@ -46,6 +47,7 @@ export function DeploySheet({ visible, onClose, onDeployed }: Props) {
   const insets = useSafeAreaInsets();
   const { user: authUser } = useAuthStore();
   const { agents, createAgent } = useAgentStore();
+  const { sendWelcomeNotification } = useNotificationStore();
 
   const [step, setStep] = useState<Step>(1);
   const [selectedStrategyId, setSelectedStrategyId] = useState<StrategyId | null>(null);
@@ -128,6 +130,12 @@ export function DeploySheet({ visible, onClose, onDeployed }: Props) {
         console.error("[DeploySheet] deploy failed:", error);
         setDeployError(error ?? "Something went wrong. Please try again.");
         return;
+      }
+
+      // Send welcome notification on very first agent deployment
+      const isFirstAgent = agents.length === 0;
+      if (isFirstAgent) {
+        sendWelcomeNotification(authUser.id, agent.name);
       }
 
       onDeployed?.(agent);
