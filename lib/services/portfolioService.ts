@@ -21,15 +21,14 @@ export async function fetchPortfolioSnapshots(
   const days = TIMEFRAME_DAYS[timeframe];
   const since = new Date();
   since.setDate(since.getDate() - days);
+  const sinceDate = since.toISOString().split("T")[0];
 
-  const { data } = await supabase
-    .from("portfolio_snapshots")
-    .select("snapshot_date, value")
-    .eq("user_id", userId)
-    .gte("snapshot_date", since.toISOString().split("T")[0])
-    .order("snapshot_date", { ascending: true });
+  const { data } = await supabase.rpc("rpc_get_portfolio_snapshots", {
+    p_user_id: userId,
+    p_since: sinceDate,
+  });
 
-  return (data ?? []).map((d) => ({
+  return ((data as { snapshot_date: string; value: number }[] | null) ?? []).map((d) => ({
     date: d.snapshot_date,
     value: Number(d.value),
   }));
@@ -45,8 +44,19 @@ export function generateSyntheticPortfolioData(
   days: number,
   baseValue = 10000
 ): ChartPoint[] {
-  const points: ChartPoint[] = [];
   const now = new Date();
+
+  // New users with no PnL get a flat line — no fake oscillation
+  if (totalPnL === 0) {
+    const start = new Date(now);
+    start.setDate(start.getDate() - days);
+    return [
+      { date: start.toISOString().split("T")[0], value: baseValue },
+      { date: now.toISOString().split("T")[0], value: baseValue },
+    ];
+  }
+
+  const points: ChartPoint[] = [];
   const endValue = baseValue + totalPnL;
 
   for (let i = days; i >= 0; i--) {

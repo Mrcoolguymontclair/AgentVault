@@ -5,7 +5,6 @@ import {
   ScrollView,
   Pressable,
   Switch,
-  Alert,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -29,19 +28,12 @@ export default function SettingsScreen() {
   const [weeklyReport, setWeeklyReport] = useState(false);
   const [showApiModal, setShowApiModal] = useState(false);
   const [showPlanModal, setShowPlanModal] = useState(false);
+  const [showSignOutModal, setShowSignOutModal] = useState(false);
 
-  function handleLogout() {
-    Alert.alert("Sign Out", "Are you sure you want to sign out?", [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Sign Out",
-        style: "destructive",
-        onPress: async () => {
-          await signOut();
-          // AuthRouter in _layout.tsx will redirect to /auth/login
-        },
-      },
-    ]);
+  async function confirmSignOut() {
+    setShowSignOutModal(false);
+    await signOut();
+    // AuthRouter in _layout.tsx redirects to /auth/login when session clears
   }
 
   return (
@@ -318,7 +310,7 @@ export default function SettingsScreen() {
           </Card>
 
           {/* Sign Out */}
-          <Button variant="danger" size="lg" onPress={handleLogout}>
+          <Button variant="danger" size="lg" onPress={() => setShowSignOutModal(true)}>
             Sign Out
           </Button>
         </View>
@@ -382,6 +374,28 @@ export default function SettingsScreen() {
             <Badge label="Connected" variant="success" dot />
           </View>
         ))}
+      </Modal>
+
+      {/* Sign Out Confirmation Modal */}
+      <Modal
+        visible={showSignOutModal}
+        onClose={() => setShowSignOutModal(false)}
+        title="Sign Out"
+        subtitle="You'll need to sign back in"
+        size="md"
+        primaryAction={{
+          label: "Sign Out",
+          onPress: confirmSignOut,
+          destructive: true,
+        }}
+        secondaryAction={{
+          label: "Cancel",
+          onPress: () => setShowSignOutModal(false),
+        }}
+      >
+        <Text style={{ color: colors.textSecondary, fontSize: 14, lineHeight: 20 }}>
+          Are you sure you want to sign out of AgentVault? Your agents will continue running in the background.
+        </Text>
       </Modal>
 
       {/* Plan Modal */}

@@ -92,7 +92,9 @@ export default function Onboarding() {
     if (isLast) {
       handleGetStarted();
     } else {
-      flatRef.current?.scrollToIndex({ index: activeIndex + 1, animated: true });
+      const next = activeIndex + 1;
+      setActiveIndex(next);
+      flatRef.current?.scrollToOffset({ offset: next * width, animated: true });
     }
   }
 

@@ -69,6 +69,18 @@ export const useAuthStore = create<AuthStore>((set) => ({
         data: { session },
       } = await supabase.auth.getSession();
 
+      if (session?.user?.id) {
+        // Validate session is live against the server — catches stale cached tokens
+        // when the project was reset or the user was deleted from auth.users
+        const { error: userError } = await supabase.auth.getUser();
+        if (userError) {
+          console.warn("[authStore] Stale session detected, signing out:", userError.message);
+          await supabase.auth.signOut();
+          set({ session: null, user: null, isLoading: false, profileComplete: false });
+          return;
+        }
+      }
+
       const profileComplete = !!(session?.user?.user_metadata?.profile_complete);
       set({ session, user: session?.user ?? null, isLoading: false, profileComplete });
 

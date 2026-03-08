@@ -49,69 +49,53 @@ export interface CreateAgentInput {
 }
 
 export async function fetchUserAgents(userId: string) {
-  const { data, error } = await supabase
-    .from("agents")
-    .select("*")
-    .eq("user_id", userId)
-    .order("created_at", { ascending: false });
-
-  return { data: data as DbAgent[] | null, error: error?.message ?? null };
+  const { data, error } = await supabase.rpc("rpc_get_user_agents", {
+    p_user_id: userId,
+  });
+  return { data: (data as DbAgent[] | null) ?? [], error: error?.message ?? null };
 }
 
 export async function createAgent(userId: string, input: CreateAgentInput) {
-  const { data, error } = await supabase
-    .from("agents")
-    .insert({
-      user_id: userId,
-      name: input.name,
-      strategy: input.strategy,
-      description: input.description,
-      status: "backtesting" as AgentStatus,
-      mode: input.mode,
-      config: input.config,
-      budget: input.budget,
-      is_private: input.is_private,
-      model_id: input.model_id,
-      pnl: 0,
-      pnl_pct: 0,
-      trades_count: 0,
-      win_rate: 0,
-      max_drawdown: 0,
-      sharpe_ratio: 0,
-    })
-    .select()
-    .single();
+  const { data, error } = await supabase.rpc("rpc_create_agent", {
+    p_user_id: userId,
+    p_name: input.name,
+    p_strategy: input.strategy,
+    p_description: input.description,
+    p_mode: input.mode,
+    p_config: input.config,
+    p_budget: input.budget,
+    p_is_private: input.is_private,
+    p_model_id: input.model_id,
+  });
+
+  if (error) {
+    console.error("[agentService] createAgent failed:", error.message, error.details, error.hint);
+  }
 
   return { data: data as DbAgent | null, error: error?.message ?? null };
 }
 
 export async function deleteAgent(agentId: string) {
-  const { error } = await supabase
-    .from("agents")
-    .delete()
-    .eq("id", agentId);
-
+  const { error } = await supabase.rpc("rpc_delete_agent", {
+    p_agent_id: agentId,
+  });
   return { error: error?.message ?? null };
 }
 
 export async function updateAgentStatus(agentId: string, status: AgentStatus) {
-  const { error } = await supabase
-    .from("agents")
-    .update({ status, updated_at: new Date().toISOString() })
-    .eq("id", agentId);
-
+  const { error } = await supabase.rpc("rpc_update_agent_status", {
+    p_agent_id: agentId,
+    p_status: status,
+  });
   return { error: error?.message ?? null };
 }
 
 export async function fetchRecentTrades(userId: string, limit = 10) {
-  const { data, error } = await supabase
-    .from("trades")
-    .select("*, agents(name)")
-    .eq("user_id", userId)
-    .order("executed_at", { ascending: false })
-    .limit(limit);
-
-  return { data: data as DbTrade[] | null, error: error?.message ?? null };
+  const { data, error } = await supabase.rpc("rpc_get_recent_trades", {
+    p_user_id: userId,
+    p_limit: limit,
+  });
+  return { data: (data as DbTrade[] | null) ?? [], error: error?.message ?? null };
 }
 
 export interface DbPublicAgent extends DbAgent {
@@ -119,37 +103,28 @@ export interface DbPublicAgent extends DbAgent {
 }
 
 export async function fetchPublicAgent(agentId: string) {
-  const { data, error } = await supabase
-    .from("agents")
-    .select("*, profiles(display_name, avatar)")
-    .eq("id", agentId)
-    .single();
-
+  const { data, error } = await supabase.rpc("rpc_get_public_agent", {
+    p_agent_id: agentId,
+  });
   return { data: data as DbPublicAgent | null, error: error?.message ?? null };
 }
 
 export async function fetchAgentTrades(agentId: string, limit = 50) {
-  const { data, error } = await supabase
-    .from("trades")
-    .select("*, agents(name)")
-    .eq("agent_id", agentId)
-    .order("executed_at", { ascending: false })
-    .limit(limit);
-
-  return { data: data as DbTrade[] | null, error: error?.message ?? null };
+  const { data, error } = await supabase.rpc("rpc_get_agent_trades", {
+    p_agent_id: agentId,
+    p_limit: limit,
+  });
+  return { data: (data as DbTrade[] | null) ?? [], error: error?.message ?? null };
 }
 
 export async function checkAgentLimit(
   userId: string,
   plan: string
 ): Promise<{ canCreate: boolean; current: number; limit: number }> {
-  const { data } = await supabase
-    .from("agents")
-    .select("id", { count: "exact" })
-    .eq("user_id", userId)
-    .neq("status", "stopped");
-
-  const current = data?.length ?? 0;
+  const { data } = await supabase.rpc("rpc_check_agent_count", {
+    p_user_id: userId,
+  });
+  const current = (data as number | null) ?? 0;
   const limit = TIER_LIMITS[plan as keyof typeof TIER_LIMITS] ?? TIER_LIMITS.free;
   return { canCreate: current < limit, current, limit };
 }

@@ -15,34 +15,23 @@ export interface DbProfile {
 }
 
 export async function fetchProfile(userId: string) {
-  const { data, error } = await supabase
-    .from("profiles")
-    .select("*")
-    .eq("id", userId)
-    .single();
-
+  const { data, error } = await supabase.rpc("rpc_get_profile", {
+    p_user_id: userId,
+  });
   return { data: data as DbProfile | null, error: error?.message ?? null };
 }
 
 export async function upsertProfile(userId: string, updates: Partial<DbProfile>) {
-  const { data, error } = await supabase
-    .from("profiles")
-    .upsert({ id: userId, ...updates }, { onConflict: "id" })
-    .select()
-    .single();
-
+  const { data, error } = await supabase.rpc("rpc_upsert_profile", {
+    p_user_id: userId,
+    p_display_name: updates.display_name ?? null,
+    p_avatar: updates.avatar ?? null,
+    p_trading_level: updates.trading_level ?? null,
+    p_plan: updates.plan ?? null,
+  });
   return { data: data as DbProfile | null, error: error?.message ?? null };
 }
 
 export async function updateActiveAgentCount(userId: string) {
-  const { count } = await supabase
-    .from("agents")
-    .select("*", { count: "exact", head: true })
-    .eq("user_id", userId)
-    .eq("status", "active");
-
-  await supabase
-    .from("profiles")
-    .update({ active_agents: count ?? 0 })
-    .eq("id", userId);
+  await supabase.rpc("rpc_update_active_agent_count", { p_user_id: userId });
 }

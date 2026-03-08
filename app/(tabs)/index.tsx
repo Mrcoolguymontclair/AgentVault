@@ -23,7 +23,6 @@ import { formatCurrency, formatPercent } from "@/utils/format";
 import { Colors } from "@/constants/colors";
 import {
   fetchPortfolioSnapshots,
-  generateSyntheticPortfolioData,
   getMarketStatus,
   type ChartPoint,
   type Timeframe,
@@ -114,15 +113,16 @@ export default function HomeScreen() {
     async (tf: Timeframe, fromCache = false) => {
       setChartLoading(true);
 
-      // Try cache first
+      // Try cache first (only use cached data if it has 2+ real points)
       if (fromCache) {
         try {
           const raw = await AsyncStorage.getItem(cacheKey);
           if (raw) {
             const cache: DashboardCache = JSON.parse(raw);
             const age = Date.now() - cache.cachedAt;
-            if (age < 5 * 60 * 1000 && cache.portfolioData[tf]) {
-              setChartData(cache.portfolioData[tf]!);
+            const cached = cache.portfolioData[tf];
+            if (age < 5 * 60 * 1000 && cached && cached.length >= 3) {
+              setChartData(cached);
               setChartLoading(false);
               return;
             }
@@ -136,27 +136,38 @@ export default function HomeScreen() {
         data = await fetchPortfolioSnapshots(authUser.id, tf);
       }
 
-      // Fall back to synthetic data if no real snapshots
-      if (data.length < 2) {
+      const hasRealData = data.length >= 2;
+
+      // Fall back to a flat line if no real snapshots — never fake wavy data
+      if (!hasRealData) {
         const days =
           tf === "1W" ? 7 : tf === "1M" ? 30 : tf === "3M" ? 90 : 180;
-        data = generateSyntheticPortfolioData(totalPnL, days);
+        const now = new Date();
+        const start = new Date(now);
+        start.setDate(start.getDate() - days);
+        const baseValue = 10000 + totalPnL;
+        data = [
+          { date: start.toISOString().split("T")[0], value: baseValue },
+          { date: now.toISOString().split("T")[0], value: baseValue },
+        ];
       }
 
       setChartData(data);
       setChartLoading(false);
 
-      // Update cache
-      try {
-        const raw = await AsyncStorage.getItem(cacheKey);
-        const cache: DashboardCache = raw
-          ? JSON.parse(raw)
-          : { portfolioData: {}, totalPnL, cachedAt: Date.now() };
-        cache.portfolioData[tf] = data;
-        cache.totalPnL = totalPnL;
-        cache.cachedAt = Date.now();
-        await AsyncStorage.setItem(cacheKey, JSON.stringify(cache));
-      } catch {}
+      // Only cache real data — don't persist the flat fallback
+      if (hasRealData) {
+        try {
+          const raw = await AsyncStorage.getItem(cacheKey);
+          const cache: DashboardCache = raw
+            ? JSON.parse(raw)
+            : { portfolioData: {}, totalPnL, cachedAt: Date.now() };
+          cache.portfolioData[tf] = data;
+          cache.totalPnL = totalPnL;
+          cache.cachedAt = Date.now();
+          await AsyncStorage.setItem(cacheKey, JSON.stringify(cache));
+        } catch {}
+      }
     },
     [authUser?.id, totalPnL, cacheKey]
   );

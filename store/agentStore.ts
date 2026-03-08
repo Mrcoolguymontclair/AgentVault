@@ -165,12 +165,19 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   },
 
   createAgent: async (userId, input) => {
-    const { data, error } = await createAgentService(userId, input);
-    if (error || !data) return { agent: null, error: error ?? "Failed to create agent" };
-
-    const agent = dbAgentToAgent(data);
-    set((state) => ({ agents: [agent, ...state.agents] }));
-    return { agent, error: null };
+    try {
+      const { data, error } = await createAgentService(userId, input);
+      if (error || !data) {
+        console.error("[agentStore] createAgent error:", error);
+        return { agent: null, error: error ?? "Failed to create agent" };
+      }
+      const agent = dbAgentToAgent(data);
+      set((state) => ({ agents: [agent, ...state.agents] }));
+      return { agent, error: null };
+    } catch (e: any) {
+      console.error("[agentStore] createAgent threw:", e);
+      return { agent: null, error: e?.message ?? "Unexpected error creating agent" };
+    }
   },
 
   deleteAgent: async (id) => {

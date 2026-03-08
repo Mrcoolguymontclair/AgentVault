@@ -40,12 +40,9 @@ export interface LeaderboardEntry {
 // ─── Leaderboard queries ──────────────────────────────────────
 
 export async function fetchAgentLeaderboard(limit = 100) {
-  const { data, error } = await supabase
-    .from("agent_leaderboard")
-    .select("*")
-    .order("rank", { ascending: true })
-    .limit(limit);
-
+  const { data, error } = await supabase.rpc("rpc_get_agent_leaderboard", {
+    p_limit: limit,
+  });
   return {
     data: (data as AgentLeaderboardEntry[] | null) ?? [],
     error: error?.message ?? null,
@@ -56,14 +53,13 @@ export async function fetchAgentLeaderboard(limit = 100) {
 export async function fetchPeriodReturns(
   since: Date
 ): Promise<Record<string, number>> {
-  const { data } = await supabase
-    .from("trades")
-    .select("agent_id, pnl")
-    .gte("executed_at", since.toISOString());
+  const { data } = await supabase.rpc("rpc_get_period_returns", {
+    p_since: since.toISOString(),
+  });
 
   const totals: Record<string, number> = {};
-  for (const t of data ?? []) {
-    totals[t.agent_id] = (totals[t.agent_id] ?? 0) + Number(t.pnl);
+  for (const t of (data as { agent_id: string; total_pnl: number }[] | null) ?? []) {
+    totals[t.agent_id] = Number(t.total_pnl);
   }
   return totals;
 }
@@ -73,56 +69,31 @@ export async function fetchTrendingAgents(limit = 6): Promise<AgentLeaderboardEn
   const since = new Date();
   since.setHours(since.getHours() - 24);
 
-  // Pull recent positive trades with their agents
-  const { data: tradeData } = await supabase
-    .from("trades")
-    .select("agent_id, pnl")
-    .gte("executed_at", since.toISOString())
-    .gt("pnl", 0);
+  const { data } = await supabase.rpc("rpc_get_trending_agents", {
+    p_since: since.toISOString(),
+    p_limit: limit,
+  });
 
-  if (!tradeData || tradeData.length === 0) return [];
-
-  // Sum pnl per agent, pick top N
-  const pnlMap: Record<string, number> = {};
-  for (const t of tradeData) {
-    pnlMap[t.agent_id] = (pnlMap[t.agent_id] ?? 0) + Number(t.pnl);
-  }
-  const topIds = Object.entries(pnlMap)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, limit)
-    .map(([id]) => id);
-
-  if (topIds.length === 0) return [];
-
-  const { data } = await supabase
-    .from("agent_leaderboard")
-    .select("*")
-    .in("id", topIds);
-
-  // Attach 24h pnl and sort by it
-  return ((data as AgentLeaderboardEntry[]) ?? [])
-    .map((e) => ({ ...e, period_pnl: pnlMap[e.id] ?? 0 }))
-    .sort((a, b) => (b.period_pnl ?? 0) - (a.period_pnl ?? 0));
+  return (data as AgentLeaderboardEntry[] | null) ?? [];
 }
 
 // ─── Follow / unfollow ────────────────────────────────────────
 
 export async function fetchFollowedAgentIds(userId: string): Promise<Set<string>> {
-  const { data } = await supabase
-    .from("agent_follows")
-    .select("agent_id")
-    .eq("follower_id", userId);
-
-  return new Set((data ?? []).map((r: { agent_id: string }) => r.agent_id));
+  const { data } = await supabase.rpc("rpc_get_followed_agent_ids", {
+    p_user_id: userId,
+  });
+  return new Set((data as string[] | null) ?? []);
 }
 
 export async function followAgent(
   followerId: string,
   agentId: string
 ): Promise<{ error: string | null }> {
-  const { error } = await supabase
-    .from("agent_follows")
-    .insert({ follower_id: followerId, agent_id: agentId });
+  const { error } = await supabase.rpc("rpc_follow_agent", {
+    p_follower_id: followerId,
+    p_agent_id: agentId,
+  });
   return { error: error?.message ?? null };
 }
 
@@ -130,30 +101,25 @@ export async function unfollowAgent(
   followerId: string,
   agentId: string
 ): Promise<{ error: string | null }> {
-  const { error } = await supabase
-    .from("agent_follows")
-    .delete()
-    .eq("follower_id", followerId)
-    .eq("agent_id", agentId);
+  const { error } = await supabase.rpc("rpc_unfollow_agent", {
+    p_follower_id: followerId,
+    p_agent_id: agentId,
+  });
   return { error: error?.message ?? null };
 }
 
 // ─── Legacy user-rank (kept for settings/other screens) ──────
 
 export async function fetchLeaderboard(limit = 50) {
-  const { data, error } = await supabase
-    .from("leaderboard_view")
-    .select("*")
-    .order("rank", { ascending: true })
-    .limit(limit);
+  const { data, error } = await supabase.rpc("rpc_get_leaderboard", {
+    p_limit: limit,
+  });
   return { data: data as LeaderboardEntry[] | null, error: error?.message ?? null };
 }
 
 export async function fetchUserRank(userId: string) {
-  const { data, error } = await supabase
-    .from("leaderboard_view")
-    .select("rank, total_return_pct, win_rate, agent_count, trade_count")
-    .eq("id", userId)
-    .single();
+  const { data, error } = await supabase.rpc("rpc_get_user_rank", {
+    p_user_id: userId,
+  });
   return { data, error: error?.message ?? null };
 }

@@ -56,6 +56,7 @@ export function DeploySheet({ visible, onClose, onDeployed }: Props) {
   const [selectedModel, setSelectedModel] = useState<ModelId>("groq_llama");
   const [isPrivate, setIsPrivate] = useState(false);
   const [isDeploying, setIsDeploying] = useState(false);
+  const [deployError, setDeployError] = useState<string | null>(null);
 
   const plan = (authUser?.user_metadata?.plan as string) ?? "free";
   const strategy = STRATEGIES.find((s) => s.id === selectedStrategyId);
@@ -70,6 +71,7 @@ export function DeploySheet({ visible, onClose, onDeployed }: Props) {
     setSelectedModel("groq_llama");
     setIsPrivate(false);
     setIsDeploying(false);
+    setDeployError(null);
     onClose();
   }
 
@@ -97,38 +99,44 @@ export function DeploySheet({ visible, onClose, onDeployed }: Props) {
     if (!authUser?.id || !selectedStrategyId || !strategy) return;
 
     setIsDeploying(true);
+    setDeployError(null);
 
-    const { canCreate, current, limit } = await checkAgentLimit(authUser.id, plan);
-    if (!canCreate) {
+    try {
+      const { canCreate, current, limit } = await checkAgentLimit(authUser.id, plan);
+      if (!canCreate) {
+        setIsDeploying(false);
+        setDeployError(
+          `Your ${plan} plan supports up to ${limit} active agent${limit === 1 ? "" : "s"}. You have ${current}. Upgrade to deploy more.`
+        );
+        return;
+      }
+
+      const { agent, error } = await createAgent(authUser.id, {
+        name: agentName.trim() || strategy.name,
+        strategy: selectedStrategyId,
+        description: strategy.description,
+        mode,
+        config: params,
+        budget,
+        is_private: isPrivate,
+        model_id: selectedModel,
+      });
+
       setIsDeploying(false);
-      Alert.alert(
-        "Agent Limit Reached",
-        `Your ${plan} plan supports up to ${limit} active agent${limit === 1 ? "" : "s"}. You have ${current}. Upgrade to deploy more.`,
-        [{ text: "OK" }]
-      );
-      return;
+
+      if (error || !agent) {
+        console.error("[DeploySheet] deploy failed:", error);
+        setDeployError(error ?? "Something went wrong. Please try again.");
+        return;
+      }
+
+      onDeployed?.(agent);
+      resetAndClose();
+    } catch (e: any) {
+      console.error("[DeploySheet] deploy threw:", e);
+      setIsDeploying(false);
+      setDeployError(e?.message ?? "Unexpected error. Please try again.");
     }
-
-    const { agent, error } = await createAgent(authUser.id, {
-      name: agentName.trim() || strategy.name,
-      strategy: selectedStrategyId,
-      description: strategy.description,
-      mode,
-      config: params,
-      budget,
-      is_private: isPrivate,
-      model_id: selectedModel,
-    });
-
-    setIsDeploying(false);
-
-    if (error || !agent) {
-      Alert.alert("Deploy Failed", error ?? "Something went wrong.");
-      return;
-    }
-
-    onDeployed?.(agent);
-    resetAndClose();
   }
 
   const tierLimit = TIER_LIMITS[plan as keyof typeof TIER_LIMITS] ?? 1;
@@ -279,6 +287,7 @@ export function DeploySheet({ visible, onClose, onDeployed }: Props) {
                   tierLimit={tierLimit}
                   onDeploy={handleDeploy}
                   insets={insets}
+                  deployError={deployError}
                 />
               )}
             </View>
@@ -804,6 +813,7 @@ function StepReview({
   tierLimit,
   onDeploy,
   insets,
+  deployError,
 }: {
   colors: any;
   strategy: Strategy;
@@ -819,6 +829,7 @@ function StepReview({
   tierLimit: number;
   onDeploy: () => void;
   insets: { bottom: number };
+  deployError: string | null;
 }) {
   const model = AI_MODELS.find((m) => m.id === selectedModel)!;
   const risk = RISK_CONFIG[strategy.risk];
@@ -842,6 +853,24 @@ function StepReview({
           <Ionicons name="warning-outline" size={18} color={Colors.danger} />
           <Text style={{ color: Colors.danger, fontSize: 13, fontWeight: "600", flex: 1 }}>
             Agent limit reached ({tierLimit}/{tierLimit}). Upgrade your plan to deploy more agents.
+          </Text>
+        </View>
+      )}
+
+      {deployError && (
+        <View
+          style={{
+            backgroundColor: Colors.dangerBg,
+            borderRadius: 14,
+            padding: 14,
+            flexDirection: "row",
+            alignItems: "center",
+            gap: 10,
+          }}
+        >
+          <Ionicons name="alert-circle-outline" size={18} color={Colors.danger} />
+          <Text style={{ color: Colors.danger, fontSize: 13, fontWeight: "600", flex: 1 }}>
+            {deployError}
           </Text>
         </View>
       )}

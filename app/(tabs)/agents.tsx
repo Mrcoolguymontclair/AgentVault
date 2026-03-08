@@ -95,7 +95,7 @@ export default function AgentsScreen() {
       <ScrollView
         horizontal
         showsHorizontalScrollIndicator={false}
-        contentContainerStyle={{ paddingHorizontal: 16, gap: 8, paddingBottom: 12 }}
+        contentContainerStyle={{ paddingHorizontal: 16, gap: 8, paddingBottom: 12, alignItems: "center" }}
       >
         {FILTERS.map((f) => {
           const count =
