@@ -26,21 +26,27 @@ Deno.serve(async (req) => {
 
     // Market hours gate (bypass with force=true for testing)
     if (!body.force && !isMarketOpen()) {
-      return json({ ok: true, message: "Market is closed — no agents run", skipped: true });
+      return json({ ok: true, marketClosed: true, message: "Market is closed — no agents run", results: [] });
     }
 
     const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
       auth: { persistSession: false },
     });
 
-    // Fetch active agents (single agent if agent_id provided)
-    let query = supabase.from("agents").select("*").eq("status", "active");
-    if (body.agent_id) query = (query as any).eq("id", body.agent_id);
+    // Fetch agents. When force=true with a specific agent_id, bypass the
+    // status=active filter so "Run Now" works on any agent (backtesting, paused, etc.)
+    let query = supabase.from("agents").select("*");
+    if (body.agent_id) {
+      query = (query as any).eq("id", body.agent_id);
+      if (!body.force) query = (query as any).eq("status", "active");
+    } else {
+      query = (query as any).eq("status", "active");
+    }
     const { data: agents, error: agentsErr } = await query;
 
     if (agentsErr) throw new Error(`DB error fetching agents: ${agentsErr.message}`);
     if (!agents || agents.length === 0) {
-      return json({ ok: true, message: "No active agents to run", count: 0 });
+      return json({ ok: true, message: "No active agents to run", count: 0, results: [] });
     }
 
     // Get Alpaca positions once (shared paper account)

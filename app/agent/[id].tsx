@@ -157,28 +157,62 @@ export default function AgentDetailScreen() {
   const handleRunNow = useCallback(async () => {
     if (!agent) return;
     setRunLoading(true);
+    // force=true bypasses the market-hours gate so Run Now always executes for testing
     const result = await invokeRunAgents(agent.id, true);
     setRunLoading(false);
 
     if (!result.ok) {
-      Alert.alert("Run Failed", result.error ?? "Something went wrong.");
+      Alert.alert("Run Failed", result.error ?? "Something went wrong. Check your connection and try again.");
       return;
     }
+
+    // Top-level market-closed gate fired (only when force=false; shouldn't happen via Run Now)
+    if (result.marketClosed) {
+      Alert.alert(
+        "Market Closed",
+        "Market is closed. Trades will execute automatically during market hours (9:30 AM – 4:00 PM ET, Mon–Fri)."
+      );
+      return;
+    }
+
     const r = result.results?.[0];
-    if (!r) { Alert.alert("No Result", "Agent ran but returned no result."); return; }
+
+    // No result at all — agent wasn't found or no agents returned
+    if (!r) {
+      Alert.alert("No Result", "Agent returned no result. Make sure the agent exists and try again.");
+      return;
+    }
 
     if (r.skipped) {
-      Alert.alert("No Trade", r.skipReason ?? "No signal generated.");
+      const reason = r.skipReason ?? "";
+      if (reason.toLowerCase().includes("no signal") || reason.toLowerCase().includes("signal generated")) {
+        Alert.alert("No Signal Found", "No trade signal found. The strategy saw no actionable opportunity in current market conditions.");
+      } else if (reason.toLowerCase().includes("market")) {
+        Alert.alert(
+          "Market Closed",
+          "Market is closed. Trades will execute automatically during market hours (9:30 AM – 4:00 PM ET, Mon–Fri)."
+        );
+      } else if (reason.toLowerCase().includes("daily loss")) {
+        Alert.alert("Risk Limit Reached", `Daily loss limit hit for today. Trading is paused until tomorrow.\n\nDetails: ${r.skipReason}`);
+      } else if (reason.toLowerCase().includes("budget fully deployed")) {
+        Alert.alert("Budget Deployed", "All available budget is already in open positions. Close a position to free up capital.");
+      } else if (reason.toLowerCase().includes("ai rejected") || reason.toLowerCase().includes("confidence")) {
+        Alert.alert("AI Skipped Trade", `The AI model decided not to trade.\n\n${r.skipReason}`);
+      } else if (reason.toLowerCase().includes("qty") || reason.toLowerCase().includes("size too small")) {
+        Alert.alert("Trade Too Small", "The position size rounds to zero at current prices. Increase your budget or adjust parameters.");
+      } else {
+        Alert.alert("No Trade", r.skipReason ?? "No trade signal found.");
+      }
     } else if (r.success) {
       const pnlStr = r.pnl !== undefined && r.pnl !== 0
-        ? ` · P&L: ${r.pnl >= 0 ? "+" : ""}$${r.pnl.toFixed(2)}` : "";
+        ? `\nP&L: ${r.pnl >= 0 ? "+" : ""}$${r.pnl.toFixed(2)}` : "";
       Alert.alert(
-        "Trade Executed",
-        `${r.side?.toUpperCase()} ${r.qty} ${r.symbol} @ $${r.price?.toFixed(2)}${pnlStr}\n\nAI: ${r.aiReasoning}`
+        "Trade Executed ✓",
+        `${r.side?.toUpperCase()} ${r.qty} ${r.symbol} @ $${r.price?.toFixed(2)}${pnlStr}\n\nAI reasoning: ${r.aiReasoning}`
       );
       fetchAgentTrades(agent.id, 50).then(({ data }) => setTrades(data ?? []));
     } else {
-      Alert.alert("Trade Failed", r.error ?? "Execution error.");
+      Alert.alert("Trade Failed", r.error ?? "Execution error. The order may have been rejected by the broker.");
     }
   }, [agent]);
 

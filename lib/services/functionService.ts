@@ -3,7 +3,7 @@ import { supabase } from "@/lib/supabase";
 export interface RunAgentResult {
   ok: boolean;
   message?: string;
-  skipped?: boolean;
+  marketClosed?: boolean;
   results?: Array<{
     agentId: string;
     agentName: string;
