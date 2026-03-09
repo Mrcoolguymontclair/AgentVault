@@ -7,6 +7,7 @@ import type { DbAgent, ExecutionResult } from "./types.ts";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
@@ -15,7 +16,7 @@ const SUPABASE_SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
-    return new Response(null, { headers: CORS });
+    return new Response("ok", { headers: CORS });
   }
 
   try {
