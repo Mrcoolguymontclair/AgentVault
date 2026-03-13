@@ -226,14 +226,14 @@ export function PortfolioChart({ data, width, isPositive, isDark, loading }: Pro
         ))}
 
         {/* X-axis labels */}
-        {xLabelIndices.map((idx) => {
+        {xLabelIndices.map((idx, i) => {
           const x = toX(idx);
-          const isFirst = idx === 0;
-          const isLast = idx === data.length - 1;
+          const isFirst = i === 0;
+          const isLast = i === xLabelIndices.length - 1;
           const anchor = isFirst ? "start" : isLast ? "end" : "middle";
           return (
             <SvgText
-              key={idx}
+              key={`x-${i}`}
               x={x}
               y={CHART_HEIGHT - 6}
               fontSize={9}
