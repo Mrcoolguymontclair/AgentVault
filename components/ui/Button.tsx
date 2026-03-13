@@ -26,18 +26,19 @@ interface ButtonProps extends PressableProps {
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 
+// Flat, border-driven variants — no rgba glow fills
 const variantStyles: Record<Variant, { bg: string; text: string; border?: string }> = {
-  primary: { bg: Colors.accent, text: "#FFFFFF" },
-  secondary: { bg: "rgba(108,92,231,0.12)", text: Colors.accent },
-  ghost: { bg: "transparent", text: Colors.accent, border: Colors.accent },
-  danger: { bg: Colors.danger, text: "#FFFFFF" },
-  success: { bg: Colors.success, text: "#FFFFFF" },
+  primary:   { bg: Colors.accent,   text: "#FFFFFF" },
+  secondary: { bg: "transparent",   text: Colors.accent,   border: Colors.accent },
+  ghost:     { bg: "transparent",   text: Colors.accentLight },
+  danger:    { bg: Colors.danger,   text: "#FFFFFF" },
+  success:   { bg: Colors.success,  text: "#FFFFFF" },
 };
 
 const sizeStyles: Record<Size, { py: number; px: number; fontSize: number; gap: number }> = {
-  sm: { py: 8, px: 16, fontSize: 13, gap: 6 },
-  md: { py: 12, px: 20, fontSize: 15, gap: 8 },
-  lg: { py: 16, px: 28, fontSize: 17, gap: 10 },
+  sm: { py: 8,  px: 16, fontSize: 13, gap: 6  },
+  md: { py: 12, px: 20, fontSize: 15, gap: 8  },
+  lg: { py: 15, px: 28, fontSize: 16, gap: 10 },
 };
 
 export function Button({
@@ -75,15 +76,15 @@ export function Button({
         animStyle,
         {
           backgroundColor: vs.bg,
-          borderRadius: 12,
+          borderRadius: 10,
           paddingVertical: ss.py,
           paddingHorizontal: ss.px,
           flexDirection: "row",
           alignItems: "center",
           justifyContent: "center",
           gap: ss.gap,
-          opacity: isDisabled ? 0.5 : 1,
-          ...(vs.border ? { borderWidth: 1.5, borderColor: vs.border } : {}),
+          opacity: isDisabled ? 0.45 : 1,
+          ...(vs.border ? { borderWidth: 1, borderColor: vs.border } : {}),
         },
         style,
       ]}
@@ -98,8 +99,8 @@ export function Button({
             style={{
               color: vs.text,
               fontSize: ss.fontSize,
-              fontWeight: "700",
-              letterSpacing: 0.3,
+              fontWeight: "600",
+              letterSpacing: 0.1,
             }}
           >
             {children}

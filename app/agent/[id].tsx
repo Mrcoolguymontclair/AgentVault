@@ -466,25 +466,7 @@ export default function AgentDetailScreen() {
           ))}
         </View>
 
-        {/* Backtesting banner */}
-        {agent.status === "backtesting" && (
-          <View
-            style={{
-              backgroundColor: Colors.accentBg, borderRadius: 14, padding: 14,
-              flexDirection: "row", alignItems: "center", gap: 10,
-            }}
-          >
-            <ActivityIndicator size="small" color={Colors.accentLight} />
-            <View style={{ flex: 1 }}>
-              <Text style={{ color: Colors.accentLight, fontWeight: "700", fontSize: 14 }}>
-                Backtesting in Progress
-              </Text>
-              <Text style={{ color: Colors.accent, fontSize: 12, marginTop: 2 }}>
-                Analyzing historical data — results coming soon.
-              </Text>
-            </View>
-          </View>
-        )}
+        {/* Backtesting banner removed — no backtesting engine yet */}
 
         {/* Run Now result banner */}
         {runResult && (
