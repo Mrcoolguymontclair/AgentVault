@@ -7,6 +7,7 @@ import {
   Alert,
   ActivityIndicator,
   Share,
+  Platform,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
@@ -56,6 +57,7 @@ export default function AgentDetailScreen() {
   const [runLoading, setRunLoading] = useState(false);
   const [isFollowing, setIsFollowing] = useState(false);
   const [followCount, setFollowCount] = useState(0);
+  const [runResult, setRunResult] = useState<{ title: string; message: string; ok: boolean } | null>(null);
 
   // Load agent — from store (own) or from DB (public)
   useEffect(() => {
@@ -154,71 +156,78 @@ export default function AgentDetailScreen() {
     );
   }, [agent, isOwnAgent, deleteAgent, router]);
 
+  // Cross-platform notify: banner in UI (always works) + native Alert on iOS/Android
+  const notify = useCallback((title: string, message: string, ok: boolean) => {
+    console.log("EDGE FUNCTION RESPONSE:", { title, message, ok });
+    setRunResult({ title, message, ok });
+    if (Platform.OS !== "web") {
+      Alert.alert(title, message);
+    }
+  }, []);
+
   const handleRunNow = useCallback(async () => {
     if (!agent) return;
     setRunLoading(true);
+    setRunResult(null);
     try {
       // force=true bypasses the market-hours gate so Run Now always executes for testing
       const result = await invokeRunAgents(agent.id, true);
 
+      console.log("EDGE FUNCTION RESPONSE:", JSON.stringify(result));
+
       if (!result.ok) {
-        Alert.alert("Run Failed", result.error ?? "Something went wrong. Check your connection and try again.");
+        notify("Run Failed", result.error ?? "Something went wrong. Check your connection and try again.", false);
         return;
       }
 
-      // Top-level market-closed gate (only when force=false; shouldn't fire via Run Now)
       if (result.marketClosed) {
-        Alert.alert(
-          "Market Closed",
-          "Market is closed. Trades will execute automatically during market hours (9:30 AM – 4:00 PM ET, Mon–Fri)."
-        );
+        notify("Market Closed", "Market is closed. Trades will execute automatically during market hours (9:30 AM – 4:00 PM ET, Mon–Fri).", false);
         return;
       }
 
       const r = result.results?.[0];
 
       if (!r) {
-        Alert.alert("No Result", "Agent returned no result. Make sure the agent exists and try again.");
+        notify("No Result", "Agent returned no result. Make sure the agent exists and try again.", false);
         return;
       }
 
       if (r.skipped) {
         const reason = r.skipReason ?? "";
         if (reason.toLowerCase().includes("no signal") || reason.toLowerCase().includes("signal generated")) {
-          Alert.alert("No Signal Found", "No trade signal found. The strategy saw no actionable opportunity in current market conditions.");
+          notify("No Signal Found", "No trade signal found. The strategy saw no actionable opportunity right now.", false);
         } else if (reason.toLowerCase().includes("market")) {
-          Alert.alert(
-            "Market Closed",
-            "Market is closed. Trades will execute automatically during market hours (9:30 AM – 4:00 PM ET, Mon–Fri)."
-          );
+          notify("Market Closed", "Market is closed. Trades will execute automatically during market hours (9:30 AM – 4:00 PM ET, Mon–Fri).", false);
         } else if (reason.toLowerCase().includes("daily loss")) {
-          Alert.alert("Risk Limit Reached", `Daily loss limit hit for today. Trading is paused until tomorrow.\n\nDetails: ${r.skipReason}`);
+          notify("Risk Limit Reached", `Daily loss limit hit for today. Trading is paused until tomorrow.\n\n${r.skipReason}`, false);
         } else if (reason.toLowerCase().includes("budget fully deployed")) {
-          Alert.alert("Budget Deployed", "All available budget is already in open positions. Close a position to free up capital.");
+          notify("Budget Deployed", "All available budget is already in open positions. Close a position to free up capital.", false);
         } else if (reason.toLowerCase().includes("ai rejected") || reason.toLowerCase().includes("confidence")) {
-          Alert.alert("AI Skipped Trade", `The AI model decided not to trade.\n\n${r.skipReason}`);
+          notify("AI Skipped Trade", `The AI model decided not to trade.\n\n${r.skipReason}`, false);
         } else if (reason.toLowerCase().includes("qty") || reason.toLowerCase().includes("size too small")) {
-          Alert.alert("Trade Too Small", "The position size rounds to zero at current prices. Increase your budget or adjust parameters.");
+          notify("Trade Too Small", "Position size rounds to zero at current prices. Increase your budget or adjust parameters.", false);
         } else {
-          Alert.alert("No Trade", r.skipReason ?? "No trade signal found.");
+          notify("No Trade", r.skipReason ?? "No trade signal found.", false);
         }
       } else if (r.success) {
         const pnlStr = r.pnl !== undefined && r.pnl !== 0
-          ? `\nP&L: ${r.pnl >= 0 ? "+" : ""}$${r.pnl.toFixed(2)}` : "";
-        Alert.alert(
+          ? `  ·  P&L: ${r.pnl >= 0 ? "+" : ""}$${r.pnl.toFixed(2)}` : "";
+        notify(
           "Trade Executed ✓",
-          `${r.side?.toUpperCase()} ${r.qty} ${r.symbol} @ $${r.price?.toFixed(2)}${pnlStr}\n\nAI reasoning: ${r.aiReasoning}`
+          `${r.side?.toUpperCase()} ${r.qty} ${r.symbol} @ $${r.price?.toFixed(2)}${pnlStr}\n\n${r.aiReasoning}`,
+          true
         );
         fetchAgentTrades(agent.id, 50).then(({ data }) => setTrades(data ?? []));
       } else {
-        Alert.alert("Trade Failed", r.error ?? "Execution error. The order may have been rejected by the broker.");
+        notify("Trade Failed", r.error ?? "Execution error. The order may have been rejected by the broker.", false);
       }
     } catch (err: any) {
-      Alert.alert("Unexpected Error", err?.message ?? "Something went wrong running the agent.");
+      console.error("EDGE FUNCTION ERROR:", err);
+      notify("Unexpected Error", err?.message ?? "Something went wrong running the agent.", false);
     } finally {
       setRunLoading(false);
     }
-  }, [agent]);
+  }, [agent, notify]);
 
   const handleShare = useCallback(async () => {
     if (!agent) return;
@@ -475,6 +484,36 @@ export default function AgentDetailScreen() {
               </Text>
             </View>
           </View>
+        )}
+
+        {/* Run Now result banner */}
+        {runResult && (
+          <Pressable
+            onPress={() => setRunResult(null)}
+            style={{
+              backgroundColor: runResult.ok ? Colors.successBg : Colors.dangerBg,
+              borderRadius: 14,
+              padding: 14,
+              borderWidth: 1,
+              borderColor: runResult.ok ? Colors.success : Colors.danger,
+              gap: 4,
+            }}
+          >
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+              <Ionicons
+                name={runResult.ok ? "checkmark-circle" : "alert-circle"}
+                size={18}
+                color={runResult.ok ? Colors.success : Colors.danger}
+              />
+              <Text style={{ color: runResult.ok ? Colors.success : Colors.danger, fontWeight: "700", fontSize: 14, flex: 1 }}>
+                {runResult.title}
+              </Text>
+              <Ionicons name="close" size={14} color={runResult.ok ? Colors.success : Colors.danger} />
+            </View>
+            <Text style={{ color: runResult.ok ? Colors.success : Colors.danger, fontSize: 13, lineHeight: 18, opacity: 0.85, paddingLeft: 26 }}>
+              {runResult.message}
+            </Text>
+          </Pressable>
         )}
 
         {/* Own agent — Pause/Resume */}
