@@ -22,6 +22,7 @@ interface ButtonProps extends PressableProps {
   icon?: React.ReactNode;
   iconPosition?: "left" | "right";
   children: React.ReactNode;
+  accessibilityLabel?: string;
 }
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
@@ -51,6 +52,7 @@ export function Button({
   disabled,
   style,
   onPress,
+  accessibilityLabel,
   ...props
 }: ButtonProps) {
   const scale = useSharedValue(1);
@@ -65,6 +67,10 @@ export function Button({
 
   return (
     <AnimatedPressable
+      accessible={true}
+      accessibilityRole="button"
+      accessibilityLabel={accessibilityLabel ?? (typeof children === "string" ? children : undefined)}
+      accessibilityState={{ disabled: !!isDisabled, busy: loading }}
       onPressIn={() => {
         if (!isDisabled) scale.value = withSpring(0.96, { damping: 15, stiffness: 400 });
       }}

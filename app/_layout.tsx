@@ -205,7 +205,7 @@ function AppLoader() {
           justifyContent: "center",
         }}
       >
-        <ActivityIndicator size="large" color="#6C5CE7" />
+        <ActivityIndicator size="large" color="#0B5C36" />
       </View>
     );
   }

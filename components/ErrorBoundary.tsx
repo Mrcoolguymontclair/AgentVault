@@ -77,7 +77,7 @@ export class ErrorBoundary extends Component<Props, State> {
           <Pressable
             onPress={() => this.setState({ hasError: false, error: null })}
             style={{
-              backgroundColor: "#6C5CE7",
+              backgroundColor: "#0B5C36",
               paddingHorizontal: 32,
               paddingVertical: 14,
               borderRadius: 12,

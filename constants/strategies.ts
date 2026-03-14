@@ -1,3 +1,4 @@
+export type TimeHorizonId = "fast" | "medium" | "slow";
 export type RiskLevel = "low" | "medium" | "high";
 export type StrategyId =
   | "momentum_rider"
@@ -39,6 +40,66 @@ export interface AIModel {
   requiredPlan: "free" | "pro" | "elite";
   badge: string;
 }
+
+export interface TimeHorizon {
+  id: TimeHorizonId;
+  name: string;
+  subtitle: string;
+  icon: string;
+  description: string;
+  holdPeriod: string;
+  targets: string;
+  stopLoss: string;
+  rsiPeriod: number;
+  smaPeriod: number;
+  positionSizePct: number;
+  bestFor: StrategyId[];
+}
+
+export const TIME_HORIZONS: TimeHorizon[] = [
+  {
+    id: "fast",
+    name: "Fast",
+    subtitle: "Day Trading",
+    icon: "⚡",
+    description: "Trades multiple times per day, holds positions for minutes to hours. Uses 1-min and 5-min candles. High turnover with tight stops.",
+    holdPeriod: "Minutes to hours",
+    targets: "0.5–2% moves",
+    stopLoss: "1–2% tight stops",
+    rsiPeriod: 7,
+    smaPeriod: 9,
+    positionSizePct: 5,
+    bestFor: ["momentum_rider", "mean_reversion"],
+  },
+  {
+    id: "medium",
+    name: "Medium",
+    subtitle: "Swing Trading",
+    icon: "📊",
+    description: "Trades a few times per week, holds positions for 1–5 days. Uses hourly and daily candles. Balanced risk and frequency.",
+    holdPeriod: "1–5 days",
+    targets: "2–8% moves",
+    stopLoss: "3–5% moderate stops",
+    rsiPeriod: 14,
+    smaPeriod: 20,
+    positionSizePct: 10,
+    bestFor: ["momentum_rider", "mean_reversion", "news_sentiment", "prediction_arb", "dca_plus"],
+  },
+  {
+    id: "slow",
+    name: "Slow",
+    subtitle: "Long-Term",
+    icon: "🐢",
+    description: "Trades a few times per month, holds positions for weeks to months. Uses daily and weekly candles. Wide stops, large target moves.",
+    holdPeriod: "Weeks to months",
+    targets: "8–20%+ moves",
+    stopLoss: "8–15% wide stops",
+    rsiPeriod: 21,
+    smaPeriod: 50,
+    positionSizePct: 15,
+    bestFor: ["dca_plus", "news_sentiment"],
+  },
+];
 
 export const STRATEGIES: Strategy[] = [
   {

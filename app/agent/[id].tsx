@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useRef } from "react";
 import {
   View,
   Text,
@@ -8,6 +8,7 @@ import {
   ActivityIndicator,
   Share,
   Platform,
+  Animated,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
@@ -27,7 +28,7 @@ import { Colors } from "@/constants/colors";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
-import { STRATEGIES, RISK_CONFIG, AI_MODELS } from "@/constants/strategies";
+import { STRATEGIES, RISK_CONFIG, AI_MODELS, TIME_HORIZONS } from "@/constants/strategies";
 import type { StrategyId, ModelId } from "@/constants/strategies";
 import type { Agent } from "@/store/agentStore";
 import { CommentSection } from "@/components/social/CommentSection";
@@ -58,6 +59,16 @@ export default function AgentDetailScreen() {
   const [isFollowing, setIsFollowing] = useState(false);
   const [followCount, setFollowCount] = useState(0);
   const [runResult, setRunResult] = useState<{ title: string; message: string; ok: boolean } | null>(null);
+
+  // Fade-in on mount (native driver only — web always visible)
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    Animated.timing(fadeAnim, {
+      toValue: 1,
+      duration: 300,
+      useNativeDriver: Platform.OS !== "web",
+    }).start();
+  }, []);
 
   // Load agent — from store (own) or from DB (public)
   useEffect(() => {
@@ -286,9 +297,11 @@ export default function AgentDetailScreen() {
   const strategyDef = STRATEGIES.find((s) => s.id === (agent.strategy as StrategyId));
   const modelDef = AI_MODELS.find((m) => m.id === (agent.modelId as ModelId));
   const riskConfig = strategyDef ? RISK_CONFIG[strategyDef.risk] : null;
+  const timeHorizonDef = TIME_HORIZONS.find((h) => h.id === (agent.config?.time_horizon as string ?? "medium")) ?? TIME_HORIZONS[1];
   const isPositive = agent.pnl >= 0;
 
   return (
+    <Animated.View style={{ flex: 1, opacity: Platform.OS === "web" ? 1 : fadeAnim }}>
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top", "bottom"]}>
       {/* Header */}
       <View
@@ -539,6 +552,12 @@ export default function AgentDetailScreen() {
               />
             )}
             <InfoRow
+              label="Time Horizon"
+              value={`${timeHorizonDef.icon} ${timeHorizonDef.name} (${timeHorizonDef.subtitle})`}
+              icon="time-outline"
+              colors={colors}
+            />
+            <InfoRow
               label="Visibility"
               value={agent.isPrivate ? "Private" : "Public"}
               icon={agent.isPrivate ? "eye-off-outline" : "eye-outline"}
@@ -601,6 +620,7 @@ export default function AgentDetailScreen() {
         </View>
       </ScrollView>
     </SafeAreaView>
+    </Animated.View>
   );
 }
 

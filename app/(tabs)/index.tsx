@@ -5,6 +5,8 @@ import {
   ScrollView,
   RefreshControl,
   Pressable,
+  Animated,
+  Platform,
 } from "react-native";
 import { BellButton } from "@/components/notifications/BellButton";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -83,6 +85,16 @@ export default function HomeScreen() {
 
   const displayName = authUser?.user_metadata?.display_name ?? "Trader";
   const avatar = authUser?.user_metadata?.avatar ?? "🚀";
+
+  // Fade-in on mount (disabled on web via useNativeDriver guard)
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    Animated.timing(fadeAnim, {
+      toValue: 1,
+      duration: 350,
+      useNativeDriver: Platform.OS !== "web",
+    }).start();
+  }, []);
 
   // ─── Derived stats ────────────────────────────────────────────────────────
   const filteredAgents = agents.filter((a) => a.mode === tradingMode);
@@ -231,6 +243,7 @@ export default function HomeScreen() {
   // ─── Render ──────────────────────────────────────────────────────────────
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
+      <Animated.View style={{ flex: 1, opacity: Platform.OS === "web" ? 1 : fadeAnim }}>
       <ScrollView
         showsVerticalScrollIndicator={false}
         refreshControl={
@@ -738,6 +751,7 @@ export default function HomeScreen() {
       </ScrollView>
 
       {/* ── Live Trading Confirmation Modal ─────────────────────────────── */}
+      </Animated.View>
       <Modal
         visible={showLiveModal}
         onClose={() => setShowLiveModal(false)}

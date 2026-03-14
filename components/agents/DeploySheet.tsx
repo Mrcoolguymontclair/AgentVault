@@ -22,11 +22,13 @@ import { Colors } from "@/constants/colors";
 import {
   STRATEGIES,
   AI_MODELS,
+  TIME_HORIZONS,
   BUDGET_PRESETS,
   RISK_CONFIG,
   TIER_LIMITS,
   type StrategyId,
   type ModelId,
+  type TimeHorizonId,
   type Strategy,
 } from "@/constants/strategies";
 import { checkAgentLimit } from "@/lib/services/agentService";
@@ -57,6 +59,7 @@ export function DeploySheet({ visible, onClose, onDeployed }: Props) {
   const [mode, setMode] = useState<AgentMode>("paper");
   const [params, setParams] = useState<Record<string, number>>({});
   const [selectedModel, setSelectedModel] = useState<ModelId>("groq_llama");
+  const [timeHorizon, setTimeHorizon] = useState<TimeHorizonId>("medium");
   const [isPrivate, setIsPrivate] = useState(false);
   const [isDeploying, setIsDeploying] = useState(false);
   const [deployError, setDeployError] = useState<string | null>(null);
@@ -72,6 +75,7 @@ export function DeploySheet({ visible, onClose, onDeployed }: Props) {
     setMode("paper");
     setParams({});
     setSelectedModel("groq_llama");
+    setTimeHorizon("medium");
     setIsPrivate(false);
     setIsDeploying(false);
     setDeployError(null);
@@ -119,7 +123,7 @@ export function DeploySheet({ visible, onClose, onDeployed }: Props) {
         strategy: selectedStrategyId,
         description: strategy.description,
         mode,
-        config: params,
+        config: { ...params, time_horizon: timeHorizon },
         budget,
         is_private: isPrivate,
         model_id: selectedModel,
@@ -266,6 +270,8 @@ export function DeploySheet({ visible, onClose, onDeployed }: Props) {
                   params={params}
                   adjustParam={adjustParam}
                   plan={plan}
+                  timeHorizon={timeHorizon}
+                  setTimeHorizon={setTimeHorizon}
                   isPrivate={isPrivate}
                   setIsPrivate={setIsPrivate}
                   onNext={() => setStep(3)}
@@ -289,6 +295,7 @@ export function DeploySheet({ visible, onClose, onDeployed }: Props) {
                   mode={mode}
                   params={params}
                   selectedModel={selectedModel}
+                  timeHorizon={timeHorizon}
                   isPrivate={isPrivate}
                   isDeploying={isDeploying}
                   atLimit={atLimit}
@@ -375,6 +382,8 @@ function StepConfigure({
   params,
   adjustParam,
   plan,
+  timeHorizon,
+  setTimeHorizon,
   isPrivate,
   setIsPrivate,
   onNext,
@@ -390,6 +399,8 @@ function StepConfigure({
   params: Record<string, number>;
   adjustParam: (key: string, delta: number, min: number, max: number, step: number) => void;
   plan: string;
+  timeHorizon: TimeHorizonId;
+  setTimeHorizon: (v: TimeHorizonId) => void;
   isPrivate: boolean;
   setIsPrivate: (v: boolean) => void;
   onNext: () => void;
@@ -555,6 +566,61 @@ function StepConfigure({
             );
           })}
         </View>
+      </View>
+
+      {/* Time Horizon */}
+      <View style={{ gap: 10 }}>
+        <Text style={{ color: colors.text, fontWeight: "600", fontSize: 14 }}>Time Horizon</Text>
+        {TIME_HORIZONS.map((h) => {
+          const selected = timeHorizon === h.id;
+          const isBestFor = h.bestFor.includes(strategy.id as StrategyId);
+          return (
+            <Pressable
+              key={h.id}
+              onPress={() => setTimeHorizon(h.id)}
+              style={{
+                borderRadius: 14,
+                borderWidth: 1.5,
+                borderColor: selected ? Colors.accent : colors.cardBorder,
+                backgroundColor: selected ? Colors.accentBg : colors.cardSecondary,
+                padding: 14,
+                gap: 6,
+              }}
+            >
+              <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+                  <Text style={{ fontSize: 22 }}>{h.icon}</Text>
+                  <View>
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                      <Text style={{ color: selected ? Colors.accentLight : colors.text, fontWeight: "700", fontSize: 15 }}>
+                        {h.name}
+                      </Text>
+                      <Text style={{ color: selected ? Colors.accentLight : colors.textSecondary, fontSize: 12, fontWeight: "600" }}>
+                        {h.subtitle}
+                      </Text>
+                      {isBestFor && (
+                        <View style={{ backgroundColor: Colors.accentBg, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6 }}>
+                          <Text style={{ color: Colors.accentLight, fontSize: 10, fontWeight: "700" }}>RECOMMENDED</Text>
+                        </View>
+                      )}
+                    </View>
+                    <Text style={{ color: colors.textTertiary, fontSize: 12, marginTop: 2 }}>
+                      {h.targets} · {h.stopLoss}
+                    </Text>
+                  </View>
+                </View>
+                {selected && (
+                  <View style={{ width: 20, height: 20, borderRadius: 10, backgroundColor: Colors.accent, alignItems: "center", justifyContent: "center" }}>
+                    <Ionicons name="checkmark" size={12} color="#fff" />
+                  </View>
+                )}
+              </View>
+              <Text style={{ color: colors.textSecondary, fontSize: 12, lineHeight: 17, paddingLeft: 32 }}>
+                {h.description}
+              </Text>
+            </Pressable>
+          );
+        })}
       </View>
 
       {/* Strategy Params */}
@@ -815,6 +881,7 @@ function StepReview({
   mode,
   params,
   selectedModel,
+  timeHorizon,
   isPrivate,
   isDeploying,
   atLimit,
@@ -831,6 +898,7 @@ function StepReview({
   mode: AgentMode;
   params: Record<string, number>;
   selectedModel: ModelId;
+  timeHorizon: TimeHorizonId;
   isPrivate: boolean;
   isDeploying: boolean;
   atLimit: boolean;
@@ -842,6 +910,7 @@ function StepReview({
 }) {
   const model = AI_MODELS.find((m) => m.id === selectedModel)!;
   const risk = RISK_CONFIG[strategy.risk];
+  const horizon = TIME_HORIZONS.find((h) => h.id === timeHorizon)!;
 
   return (
     <ScrollView
@@ -915,6 +984,7 @@ function StepReview({
           icon: mode === "live" ? "flash-outline" : "flask-outline",
         },
         { label: "AI Model", value: `${model.icon} ${model.name}`, icon: "hardware-chip-outline" },
+        { label: "Time Horizon", value: `${horizon.icon} ${horizon.name} (${horizon.subtitle})`, icon: "time-outline" },
         { label: "Visibility", value: isPrivate ? "Private" : "Public", icon: isPrivate ? "eye-off-outline" : "eye-outline" },
         { label: "Initial Status", value: "Backtesting", icon: "time-outline" },
       ].map((row) => (

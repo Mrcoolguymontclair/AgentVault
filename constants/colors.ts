@@ -29,12 +29,12 @@ export const Colors = {
     skeleton: "#EEEEEE",
     skeletonHighlight: "#E0E0E0",
   },
-  // Brand accent — kept as-is, glow treatments removed
-  accent: "#6C5CE7",
-  accentLight: "#8B7FF5",
-  accentDark: "#5A4DD4",
-  accentBg: "rgba(108,92,231,0.08)",
-  // Robinhood-style sharp trade colors
+  // Primary brand — trust green
+  accent: "#0B5C36",
+  accentLight: "#22C55E",
+  accentDark: "#084428",
+  accentBg: "rgba(11,92,54,0.10)",
+  // Trade colors — sharp and clear
   success: "#00C805",
   successBg: "rgba(0,200,5,0.10)",
   danger: "#FF3B30",
@@ -42,7 +42,8 @@ export const Colors = {
   // Supporting
   warning: "#FF9500",
   warningBg: "rgba(255,149,0,0.10)",
-  gold: "#FFD700",
+  // Premium gold — for badges, subscription highlights, leaderboard icons
+  gold: "#D4AF37",
   silver: "#8E8E93",
   bronze: "#CD7F32",
 };

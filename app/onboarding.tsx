@@ -29,7 +29,7 @@ const SLIDES = [
       { icon: "analytics-outline" as const, text: "LLM-driven decisions" },
       { icon: "shield-checkmark-outline" as const, text: "Risk-managed automatically" },
     ],
-    gradient: ["#6C5CE7", "#5A4DD4"],
+    gradient: ["#0B5C36", "#084428"],
   },
   {
     id: "2",
@@ -205,7 +205,7 @@ function SlideContent({ slide, insetTop }: { slide: (typeof SLIDES)[0]; insetTop
       <View style={{ alignItems: "flex-start" }}>
         <View
           style={{
-            backgroundColor: "rgba(108,92,231,0.15)",
+            backgroundColor: "rgba(11,92,54,0.12)",
             paddingHorizontal: 14,
             paddingVertical: 6,
             borderRadius: 100,

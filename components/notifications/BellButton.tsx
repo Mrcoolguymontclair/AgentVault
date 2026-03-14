@@ -8,14 +8,21 @@ import { Colors } from "@/constants/colors";
 
 interface Props {
   size?: number;
+  accessibilityLabel?: string;
 }
 
-export function BellButton({ size = 22 }: Props) {
+export function BellButton({ size = 22, accessibilityLabel }: Props) {
   const { colors } = useTheme();
   const unreadCount = useNotificationStore((s) => s.unreadCount);
 
   return (
     <Pressable
+      accessible={true}
+      accessibilityRole="button"
+      accessibilityLabel={
+        accessibilityLabel ??
+        (unreadCount > 0 ? `Notifications, ${unreadCount} unread` : "Notifications")
+      }
       onPress={() => router.push("/notifications")}
       style={({ pressed }) => ({
         width: 40,

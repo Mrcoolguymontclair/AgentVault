@@ -12,7 +12,7 @@ interface BadgeProps {
 }
 
 const variantMap: Record<BadgeVariant, { bg: string; text: string; dot?: string }> = {
-  accent: { bg: "rgba(108,92,231,0.15)", text: Colors.accentLight },
+  accent: { bg: "rgba(11,92,54,0.12)", text: Colors.accentLight },
   success: { bg: Colors.successBg, text: Colors.success },
   danger: { bg: Colors.dangerBg, text: Colors.danger },
   warning: { bg: Colors.warningBg, text: Colors.warning },

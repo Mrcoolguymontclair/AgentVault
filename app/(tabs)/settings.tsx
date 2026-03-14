@@ -221,7 +221,7 @@ export default function SettingsScreen() {
           <SettingsSection title="Appearance" colors={colors}>
             <SettingsRow
               icon="moon-outline"
-              iconBg="rgba(108,92,231,0.12)"
+              iconBg="rgba(11,92,54,0.10)"
               iconColor={Colors.accentLight}
               label="Dark Mode"
               colors={colors}
@@ -241,7 +241,7 @@ export default function SettingsScreen() {
           <SettingsSection title="Subscription" colors={colors}>
             <SettingsRow
               icon="star-outline"
-              iconBg="rgba(108,92,231,0.12)"
+              iconBg="rgba(11,92,54,0.10)"
               iconColor={Colors.accentLight}
               label={plan === "elite" ? "Pro+ Plan" : plan === "pro" ? "Pro Plan" : "Free Plan"}
               subtitle={
@@ -283,7 +283,7 @@ export default function SettingsScreen() {
           <SettingsSection title="Notifications" colors={colors}>
             <SettingsRow
               icon="notifications-outline"
-              iconBg="rgba(108,92,231,0.12)"
+              iconBg="rgba(11,92,54,0.10)"
               iconColor={Colors.accentLight}
               label="Notification Center"
               subtitle={unreadCount > 0 ? `${unreadCount} unread` : "View all notifications"}
@@ -398,7 +398,7 @@ export default function SettingsScreen() {
             <Divider colors={colors} />
             <SettingsRow
               icon="download-outline"
-              iconBg="rgba(108,92,231,0.12)"
+              iconBg="rgba(11,92,54,0.10)"
               iconColor={Colors.accentLight}
               label={isExporting ? "Exporting..." : "Export Trade History"}
               subtitle="Download as CSV"
