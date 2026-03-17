@@ -2,8 +2,9 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { isMarketOpen } from "./market-utils.ts";
 import { confirmTrade } from "./groq.ts";
 import { placeOrder, getPositions } from "./alpaca.ts";
-import { runStrategy } from "./strategies.ts";
-import type { DbAgent, ExecutionResult } from "./types.ts";
+import { runStrategy, clearMarketCache } from "./strategies.ts";
+import { initTracker, setCurrentAgent } from "./groq-tracker.ts";
+import type { DbAgent, ExecutionResult, AgentLogInsert } from "./types.ts";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -50,13 +51,40 @@ Deno.serve(async (req) => {
       return json({ ok: true, message: "No active agents to run", count: 0, results: [] });
     }
 
+    // ── Init Groq usage tracker ───────────────────────────────
+    // Load today's token count so the tracker knows the daily budget remaining
+    const { data: dailyTokenData } = await supabase.rpc("rpc_get_groq_usage_today");
+    initTracker(supabase, Number(dailyTokenData ?? 0));
+
+    // ── Clear market-data cache for this run ──────────────────
+    clearMarketCache();
+
+    // ── Prioritise agents (least-recently-traded first) ───────
+    // Agents that just traded are less likely to have a new signal;
+    // check them last so earlier agents get the full token budget.
+    const fifteenMinsAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    const { data: recentTradeRows } = await supabase
+      .from("trades")
+      .select("agent_id")
+      .in("agent_id", (agents as DbAgent[]).map((a) => a.id))
+      .gte("executed_at", fifteenMinsAgo);
+    const recentlyTraded = new Set<string>((recentTradeRows ?? []).map((r: any) => r.agent_id));
+
+    const sortedAgents = [...(agents as DbAgent[])].sort((a, b) => {
+      const aR = recentlyTraded.has(a.id) ? 1 : 0;
+      const bR = recentlyTraded.has(b.id) ? 1 : 0;
+      return aR - bR; // agents that just traded go to the end
+    });
+
     // Get Alpaca positions once (shared paper account)
     const alpacaPositions = await getPositions();
 
-    // Run agents sequentially to avoid overwhelming APIs
+    // ── Run agents sequentially with inter-agent spacing ──────
     const results: ExecutionResult[] = [];
-    for (const agent of agents as DbAgent[]) {
-      const result = await runAgent(supabase, agent, alpacaPositions);
+    for (let i = 0; i < sortedAgents.length; i++) {
+      if (i > 0) await new Promise((r) => setTimeout(r, 500)); // spread load
+      setCurrentAgent(sortedAgents[i].id);
+      const result = await runAgent(supabase, sortedAgents[i], alpacaPositions);
       results.push(result);
     }
 
@@ -93,9 +121,13 @@ async function runAgent(
       .gte("executed_at", `${today}T00:00:00Z`);
 
     const dailyPnl = (todayTrades ?? []).reduce((s, t) => s + Number(t.pnl), 0);
-    const dailyLossLimit = budget * 0.05;
+    const dailyLossLimit = budget * 0.03; // 3% daily loss limit
     if (dailyPnl <= -dailyLossLimit) {
-      return { ...base, skipped: true, skipReason: `Daily loss limit hit ($${Math.abs(dailyPnl).toFixed(2)})` };
+      await logExecution(supabase, agent, {
+        action: "skipped",
+        skip_reason: `Daily loss limit hit (3%) — $${Math.abs(dailyPnl).toFixed(2)} lost today`,
+      });
+      return { ...base, skipped: true, skipReason: `Daily loss limit hit ($${Math.abs(dailyPnl).toFixed(2)} — 3% of budget)` };
     }
 
     // ── Calculate agent's virtual positions from DB ──────────
@@ -130,27 +162,57 @@ async function runAgent(
     const availableBudget = Math.max(0, budget - invested);
 
     if (availableBudget < 1) {
+      await logExecution(supabase, agent, { action: "skipped", skip_reason: "Budget fully deployed" });
       return { ...base, skipped: true, skipReason: "Budget fully deployed" };
     }
 
+    // ── Consecutive no-signal detection ──────────────────────
+    // If the last 3 runs all had no signal, temporarily loosen thresholds by 10%
+    const { data: recentLogs } = await supabase
+      .from("agent_logs")
+      .select("signal_detected")
+      .eq("agent_id", agent.id)
+      .order("timestamp", { ascending: false })
+      .limit(3);
+    const recentLogArr = recentLogs ?? [];
+    const consecutiveNoSignal =
+      recentLogArr.length >= 3 &&
+      recentLogArr.every((log: any) => !log.signal_detected);
+
+    const enrichedConfig = consecutiveNoSignal
+      ? { ...config, _loosen: 1 }
+      : config;
+
     // ── Run strategy ─────────────────────────────────────────
-    const signal = await runStrategy(agent.strategy, config, agentPositions);
+    const signal = await runStrategy(agent.strategy, enrichedConfig, agentPositions, agentAvgCost);
     if (!signal) {
+      await logExecution(supabase, agent, { action: "skipped", skip_reason: "No signal generated" });
       return { ...base, skipped: true, skipReason: "No signal generated" };
     }
 
     // ── Resolve notional → dollar amount ─────────────────────
-    // For buys: notional is a % of budget.  For sells: notional is total $.
+    // For buys: notional is a % of budget.  For sells: notional is total $ (may be partial).
     let dollarAmount: number;
     if (signal.side === "buy") {
-      // notional stored as a percentage value (e.g. 10 = 10%)
       dollarAmount = Math.min(budget * (signal.notional / 100), availableBudget);
     } else {
-      dollarAmount = signal.notional; // already in dollars
+      dollarAmount = signal.notional; // already in dollars (full or partial)
     }
 
     if (dollarAmount < 1) {
+      await logExecution(supabase, agent, { action: "skipped", skip_reason: "Trade size too small", signal_detected: true, signal_symbol: signal.symbol, signal_side: signal.side });
       return { ...base, skipped: true, skipReason: "Trade size too small" };
+    }
+
+    // ── Portfolio concentration check (40% max per symbol) ───
+    if (signal.side === "buy") {
+      const currentPositionValue = (agentPositions[signal.symbol] ?? 0) * (agentAvgCost[signal.symbol] ?? signal.marketData.currentPrice);
+      const projectedValue = currentPositionValue + dollarAmount;
+      if (projectedValue > budget * 0.40) {
+        const skipReason = `Would exceed 40% portfolio concentration in ${signal.symbol}`;
+        await logExecution(supabase, agent, { action: "skipped", skip_reason: skipReason, signal_detected: true, signal_symbol: signal.symbol, signal_side: signal.side });
+        return { ...base, skipped: true, skipReason };
+      }
     }
 
     // ── AI confirmation ───────────────────────────────────────
@@ -162,22 +224,32 @@ async function runAgent(
       ...signal.marketData,
     });
 
-    if (!ai.execute || ai.confidence < 0.6) {
-      return {
-        ...base,
-        skipped: true,
-        skipReason: `AI rejected (confidence ${(ai.confidence * 100).toFixed(0)}%): ${ai.reasoning}`,
-      };
+    // Lower threshold: 0.45 default (0.30 in aggressive mode)
+    const aiThreshold = config.aggressive_mode ? 0.30 : 0.45;
+    if (!ai.execute || ai.confidence < aiThreshold) {
+      const skipReason = `AI rejected (confidence ${(ai.confidence * 100).toFixed(0)}%): ${ai.reasoning}`;
+      await logExecution(supabase, agent, {
+        action: "skipped",
+        skip_reason: skipReason,
+        signal_detected: true,
+        signal_symbol: signal.symbol,
+        signal_side: signal.side,
+        ai_reasoning: ai.reasoning,
+        ai_confidence: ai.confidence,
+      });
+      return { ...base, skipped: true, skipReason };
     }
 
     // ── Calculate quantity ────────────────────────────────────
     const currentPrice = signal.marketData.currentPrice;
     const rawQty = dollarAmount / currentPrice;
+    // For partial sells: qty is derived from dollarAmount, capped at position size
     const qty = signal.side === "sell"
-      ? Math.floor(agentPositions[signal.symbol] ?? 0)
+      ? Math.min(Math.floor(dollarAmount / currentPrice), Math.floor(agentPositions[signal.symbol] ?? 0))
       : Math.floor(rawQty);
 
     if (qty <= 0) {
+      await logExecution(supabase, agent, { action: "skipped", skip_reason: "Qty rounds to 0", signal_detected: true, signal_symbol: signal.symbol, signal_side: signal.side });
       return { ...base, skipped: true, skipReason: "Qty rounds to 0" };
     }
 
@@ -249,7 +321,7 @@ async function runAgent(
       { onConflict: "user_id,agent_id,snapshot_date" }
     );
 
-    return {
+    const executionResult: ExecutionResult = {
       ...base,
       success: true,
       symbol: signal.symbol,
@@ -259,9 +331,49 @@ async function runAgent(
       pnl: tradePnl,
       aiReasoning: ai.reasoning,
     };
+
+    await logExecution(supabase, agent, {
+      action: "traded",
+      signal_detected: true,
+      signal_symbol: signal.symbol,
+      signal_side: signal.side,
+      ai_reasoning: ai.reasoning,
+      ai_confidence: ai.confidence,
+      trade_symbol: signal.symbol,
+      trade_qty: qty,
+      trade_price: fillPrice,
+      trade_pnl: tradePnl,
+    });
+
+    return executionResult;
   } catch (err) {
     console.error(`Agent ${agent.id} error:`, err);
+    await logExecution(supabase, agent, { action: "error", skip_reason: String(err) });
     return { ...base, error: String(err) };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Agent execution logger
+// ─────────────────────────────────────────────────────────────
+async function logExecution(
+  supabase: ReturnType<typeof createClient>,
+  agent: DbAgent,
+  fields: Partial<AgentLogInsert>
+): Promise<void> {
+  try {
+    await supabase.from("agent_logs").insert({
+      agent_id: agent.id,
+      user_id: agent.user_id,
+      agent_name: agent.name,
+      strategy: agent.strategy,
+      signal_detected: false,
+      action: "skipped",
+      ...fields,
+    });
+  } catch (err) {
+    // Non-fatal: log errors should never crash the agent run
+    console.error("Failed to write agent_log:", err);
   }
 }
 

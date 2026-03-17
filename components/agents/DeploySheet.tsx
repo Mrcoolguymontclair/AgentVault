@@ -58,9 +58,11 @@ export function DeploySheet({ visible, onClose, onDeployed }: Props) {
   const [budget, setBudget] = useState(1000);
   const [mode, setMode] = useState<AgentMode>("paper");
   const [params, setParams] = useState<Record<string, number>>({});
+  const [strategyPrompt, setStrategyPrompt] = useState("");
   const [selectedModel, setSelectedModel] = useState<ModelId>("groq_llama");
   const [timeHorizon, setTimeHorizon] = useState<TimeHorizonId>("medium");
   const [isPrivate, setIsPrivate] = useState(false);
+  const [aggressive, setAggressive] = useState(false);
   const [isDeploying, setIsDeploying] = useState(false);
   const [deployError, setDeployError] = useState<string | null>(null);
 
@@ -74,9 +76,11 @@ export function DeploySheet({ visible, onClose, onDeployed }: Props) {
     setBudget(1000);
     setMode("paper");
     setParams({});
+    setStrategyPrompt("");
     setSelectedModel("groq_llama");
     setTimeHorizon("medium");
     setIsPrivate(false);
+    setAggressive(false);
     setIsDeploying(false);
     setDeployError(null);
     onClose();
@@ -118,12 +122,23 @@ export function DeploySheet({ visible, onClose, onDeployed }: Props) {
         return;
       }
 
+      const config: Record<string, number | string> = {
+        ...params,
+        time_horizon: timeHorizon,
+        ...(aggressive ? { aggressive_mode: 1 } : {}),
+        ...(selectedStrategyId === "custom" && strategyPrompt.trim()
+          ? { strategy_prompt: strategyPrompt.trim() }
+          : {}),
+      };
+
       const { agent, error } = await createAgent(authUser.id, {
         name: agentName.trim() || strategy.name,
         strategy: selectedStrategyId,
-        description: strategy.description,
+        description: selectedStrategyId === "custom"
+          ? strategyPrompt.trim().slice(0, 200) || strategy.description
+          : strategy.description,
         mode,
-        config: { ...params, time_horizon: timeHorizon },
+        config,
         budget,
         is_private: isPrivate,
         model_id: selectedModel,
@@ -269,11 +284,15 @@ export function DeploySheet({ visible, onClose, onDeployed }: Props) {
                   setMode={setMode}
                   params={params}
                   adjustParam={adjustParam}
+                  strategyPrompt={strategyPrompt}
+                  setStrategyPrompt={setStrategyPrompt}
                   plan={plan}
                   timeHorizon={timeHorizon}
                   setTimeHorizon={setTimeHorizon}
                   isPrivate={isPrivate}
                   setIsPrivate={setIsPrivate}
+                  aggressive={aggressive}
+                  setAggressive={setAggressive}
                   onNext={() => setStep(3)}
                 />
               )}
@@ -294,9 +313,11 @@ export function DeploySheet({ visible, onClose, onDeployed }: Props) {
                   budget={budget}
                   mode={mode}
                   params={params}
+                  strategyPrompt={strategyPrompt}
                   selectedModel={selectedModel}
                   timeHorizon={timeHorizon}
                   isPrivate={isPrivate}
+                  aggressive={aggressive}
                   isDeploying={isDeploying}
                   atLimit={atLimit}
                   plan={plan}
@@ -370,6 +391,24 @@ function StepStrategy({ colors, onSelect }: { colors: any; onSelect: (s: Strateg
   );
 }
 
+const EXAMPLE_PROMPTS = [
+  {
+    label: "Buy the Dip",
+    prompt:
+      "Buy any stock that drops 5% or more in a single day. Sell when it recovers 3% from my buy price. Never invest more than $200 per trade.",
+  },
+  {
+    label: "Momentum Chaser",
+    prompt:
+      "Buy stocks showing strong upward momentum — price above their 20-day average with RSI above 60. Sell if price drops below the 20-day average.",
+  },
+  {
+    label: "Oversold Bounce",
+    prompt:
+      "Focus on large-cap tech stocks. Buy only when RSI drops below 35, indicating oversold conditions. Take profits at a 5% gain or cut losses at 3% down.",
+  },
+];
+
 function StepConfigure({
   colors,
   strategy,
@@ -381,11 +420,15 @@ function StepConfigure({
   setMode,
   params,
   adjustParam,
+  strategyPrompt,
+  setStrategyPrompt,
   plan,
   timeHorizon,
   setTimeHorizon,
   isPrivate,
   setIsPrivate,
+  aggressive,
+  setAggressive,
   onNext,
 }: {
   colors: any;
@@ -398,11 +441,15 @@ function StepConfigure({
   setMode: (v: AgentMode) => void;
   params: Record<string, number>;
   adjustParam: (key: string, delta: number, min: number, max: number, step: number) => void;
+  strategyPrompt: string;
+  setStrategyPrompt: (v: string) => void;
   plan: string;
   timeHorizon: TimeHorizonId;
   setTimeHorizon: (v: TimeHorizonId) => void;
   isPrivate: boolean;
   setIsPrivate: (v: boolean) => void;
+  aggressive: boolean;
+  setAggressive: (v: boolean) => void;
   onNext: () => void;
 }) {
   const canGoLive = plan !== "free";
@@ -623,96 +670,182 @@ function StepConfigure({
         })}
       </View>
 
-      {/* Strategy Params */}
-      <View style={{ gap: 12 }}>
-        <Text style={{ color: colors.text, fontWeight: "600", fontSize: 14 }}>Strategy Parameters</Text>
-        {strategy.params.map((p) => {
-          const val = params[p.key] ?? p.default;
-          return (
-            <View
-              key={p.key}
+      {/* Strategy Params OR Custom Prompt */}
+      {strategy.id === "custom" ? (
+        <View style={{ gap: 12 }}>
+          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+            <Text style={{ color: colors.text, fontWeight: "600", fontSize: 14 }}>Your Trading Instructions</Text>
+            <View style={{ backgroundColor: Colors.accentBg, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8 }}>
+              <Text style={{ color: Colors.accentLight, fontSize: 10, fontWeight: "700" }}>AI POWERED</Text>
+            </View>
+          </View>
+          <TextInput
+            value={strategyPrompt}
+            onChangeText={setStrategyPrompt}
+            placeholder={
+              "Describe your trading strategy...\n\nExample: Buy AAPL when the price drops more than 3% in a single day. Sell when it recovers 2% from my buy price. Never invest more than $200 per trade."
+            }
+            placeholderTextColor={colors.textTertiary}
+            multiline
+            numberOfLines={6}
+            style={{
+              color: colors.text,
+              backgroundColor: colors.cardSecondary,
+              borderRadius: 14,
+              borderWidth: 1.5,
+              borderColor: strategyPrompt.trim() ? Colors.accent : colors.cardBorder,
+              paddingHorizontal: 14,
+              paddingVertical: 12,
+              fontSize: 14,
+              lineHeight: 20,
+              minHeight: 140,
+              textAlignVertical: "top",
+            }}
+            maxLength={1000}
+          />
+          <View style={{ flexDirection: "row", justifyContent: "flex-end" }}>
+            <Text style={{ color: colors.textTertiary, fontSize: 11 }}>
+              {strategyPrompt.length}/1000
+            </Text>
+          </View>
+
+          {/* Example prompts */}
+          <Text style={{ color: colors.textSecondary, fontSize: 12, fontWeight: "600" }}>
+            Quick examples — tap to use:
+          </Text>
+          {EXAMPLE_PROMPTS.map((ex) => (
+            <Pressable
+              key={ex.label}
+              onPress={() => setStrategyPrompt(ex.prompt)}
               style={{
-                backgroundColor: colors.cardSecondary,
-                borderRadius: 14,
+                backgroundColor: strategyPrompt === ex.prompt ? Colors.accentBg : colors.cardSecondary,
+                borderRadius: 12,
                 borderWidth: 1,
-                borderColor: colors.cardBorder,
-                padding: 14,
-                gap: 8,
+                borderColor: strategyPrompt === ex.prompt ? Colors.accent : colors.cardBorder,
+                padding: 12,
+                gap: 4,
               }}
             >
-              <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
-                <View style={{ flex: 1 }}>
-                  <Text style={{ color: colors.text, fontWeight: "600", fontSize: 14 }}>{p.label}</Text>
-                  <Text style={{ color: colors.textTertiary, fontSize: 12, marginTop: 2 }}>{p.hint}</Text>
-                </View>
-                <Text style={{ color: Colors.accent, fontWeight: "800", fontSize: 18 }}>
-                  {p.unit.startsWith("$") ? `$${val}` : `${val}${p.unit}`}
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                <Ionicons
+                  name="bulb-outline"
+                  size={14}
+                  color={strategyPrompt === ex.prompt ? Colors.accentLight : colors.textSecondary}
+                />
+                <Text
+                  style={{
+                    color: strategyPrompt === ex.prompt ? Colors.accentLight : colors.text,
+                    fontWeight: "700",
+                    fontSize: 13,
+                  }}
+                >
+                  {ex.label}
                 </Text>
               </View>
-              <View
+              <Text
                 style={{
-                  flexDirection: "row",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  gap: 12,
+                  color: strategyPrompt === ex.prompt ? Colors.accentLight : colors.textSecondary,
+                  fontSize: 12,
+                  lineHeight: 17,
+                  opacity: 0.85,
+                }}
+                numberOfLines={2}
+              >
+                {ex.prompt}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+      ) : (
+        <View style={{ gap: 12 }}>
+          <Text style={{ color: colors.text, fontWeight: "600", fontSize: 14 }}>Strategy Parameters</Text>
+          {strategy.params.map((p) => {
+            const val = params[p.key] ?? p.default;
+            return (
+              <View
+                key={p.key}
+                style={{
+                  backgroundColor: colors.cardSecondary,
+                  borderRadius: 14,
+                  borderWidth: 1,
+                  borderColor: colors.cardBorder,
+                  padding: 14,
+                  gap: 8,
                 }}
               >
-                <Pressable
-                  onPress={() => adjustParam(p.key, -p.step, p.min, p.max, p.step)}
-                  hitSlop={8}
-                  style={{
-                    width: 40,
-                    height: 40,
-                    borderRadius: 12,
-                    backgroundColor: colors.card,
-                    borderWidth: 1,
-                    borderColor: colors.cardBorder,
-                    alignItems: "center",
-                    justifyContent: "center",
-                  }}
-                >
-                  <Ionicons name="remove" size={20} color={val <= p.min ? colors.textTertiary : colors.text} />
-                </Pressable>
-                {/* Progress track */}
-                <View style={{ flex: 1, height: 4, backgroundColor: colors.cardBorder, borderRadius: 2 }}>
-                  <View
-                    style={{
-                      width: `${((val - p.min) / (p.max - p.min)) * 100}%`,
-                      height: 4,
-                      borderRadius: 2,
-                      backgroundColor: Colors.accent,
-                    }}
-                  />
+                <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ color: colors.text, fontWeight: "600", fontSize: 14 }}>{p.label}</Text>
+                    <Text style={{ color: colors.textTertiary, fontSize: 12, marginTop: 2 }}>{p.hint}</Text>
+                  </View>
+                  <Text style={{ color: Colors.accent, fontWeight: "800", fontSize: 18 }}>
+                    {p.unit.startsWith("$") ? `$${val}` : `${val}${p.unit}`}
+                  </Text>
                 </View>
-                <Pressable
-                  onPress={() => adjustParam(p.key, p.step, p.min, p.max, p.step)}
-                  hitSlop={8}
+                <View
                   style={{
-                    width: 40,
-                    height: 40,
-                    borderRadius: 12,
-                    backgroundColor: colors.card,
-                    borderWidth: 1,
-                    borderColor: colors.cardBorder,
+                    flexDirection: "row",
                     alignItems: "center",
-                    justifyContent: "center",
+                    justifyContent: "space-between",
+                    gap: 12,
                   }}
                 >
-                  <Ionicons name="add" size={20} color={val >= p.max ? colors.textTertiary : colors.text} />
-                </Pressable>
+                  <Pressable
+                    onPress={() => adjustParam(p.key, -p.step, p.min, p.max, p.step)}
+                    hitSlop={8}
+                    style={{
+                      width: 40,
+                      height: 40,
+                      borderRadius: 12,
+                      backgroundColor: colors.card,
+                      borderWidth: 1,
+                      borderColor: colors.cardBorder,
+                      alignItems: "center",
+                      justifyContent: "center",
+                    }}
+                  >
+                    <Ionicons name="remove" size={20} color={val <= p.min ? colors.textTertiary : colors.text} />
+                  </Pressable>
+                  <View style={{ flex: 1, height: 4, backgroundColor: colors.cardBorder, borderRadius: 2 }}>
+                    <View
+                      style={{
+                        width: `${((val - p.min) / (p.max - p.min)) * 100}%`,
+                        height: 4,
+                        borderRadius: 2,
+                        backgroundColor: Colors.accent,
+                      }}
+                    />
+                  </View>
+                  <Pressable
+                    onPress={() => adjustParam(p.key, p.step, p.min, p.max, p.step)}
+                    hitSlop={8}
+                    style={{
+                      width: 40,
+                      height: 40,
+                      borderRadius: 12,
+                      backgroundColor: colors.card,
+                      borderWidth: 1,
+                      borderColor: colors.cardBorder,
+                      alignItems: "center",
+                      justifyContent: "center",
+                    }}
+                  >
+                    <Ionicons name="add" size={20} color={val >= p.max ? colors.textTertiary : colors.text} />
+                  </Pressable>
+                </View>
+                <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+                  <Text style={{ color: colors.textTertiary, fontSize: 11 }}>
+                    Min: {p.unit.startsWith("$") ? `$${p.min}` : `${p.min}${p.unit}`}
+                  </Text>
+                  <Text style={{ color: colors.textTertiary, fontSize: 11 }}>
+                    Max: {p.unit.startsWith("$") ? `$${p.max}` : `${p.max}${p.unit}`}
+                  </Text>
+                </View>
               </View>
-              <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
-                <Text style={{ color: colors.textTertiary, fontSize: 11 }}>
-                  Min: {p.unit.startsWith("$") ? `$${p.min}` : `${p.min}${p.unit}`}
-                </Text>
-                <Text style={{ color: colors.textTertiary, fontSize: 11 }}>
-                  Max: {p.unit.startsWith("$") ? `$${p.max}` : `${p.max}${p.unit}`}
-                </Text>
-              </View>
-            </View>
-          );
-        })}
-      </View>
+            );
+          })}
+        </View>
+      )}
 
       {/* Private Toggle */}
       <Pressable
@@ -764,8 +897,58 @@ function StepConfigure({
         </View>
       </Pressable>
 
+      {/* Aggressive Mode Toggle */}
+      <Pressable
+        onPress={() => setAggressive(!aggressive)}
+        style={{
+          flexDirection: "row",
+          alignItems: "center",
+          gap: 14,
+          padding: 14,
+          backgroundColor: colors.cardSecondary,
+          borderRadius: 14,
+          borderWidth: 1,
+          borderColor: aggressive ? Colors.warning : colors.cardBorder,
+        }}
+      >
+        <Ionicons
+          name="flash"
+          size={20}
+          color={aggressive ? Colors.warning : colors.textSecondary}
+        />
+        <View style={{ flex: 1 }}>
+          <Text style={{ color: colors.text, fontWeight: "600", fontSize: 14 }}>
+            Aggressive Mode
+          </Text>
+          <Text style={{ color: colors.textSecondary, fontSize: 12, marginTop: 2 }}>
+            {aggressive
+              ? "Looser signals — trades more often with lower confidence bar"
+              : "Default sensitivity — balanced signal quality"}
+          </Text>
+        </View>
+        <View
+          style={{
+            width: 24, height: 24, borderRadius: 8,
+            backgroundColor: aggressive ? Colors.warning : colors.card,
+            borderWidth: 1.5,
+            borderColor: aggressive ? Colors.warning : colors.cardBorder,
+            alignItems: "center", justifyContent: "center",
+          }}
+        >
+          {aggressive && <Ionicons name="checkmark" size={14} color="#fff" />}
+        </View>
+      </Pressable>
+
       {/* Next Button */}
-      <Button variant="primary" size="lg" onPress={onNext} disabled={!agentName.trim()}>
+      <Button
+        variant="primary"
+        size="lg"
+        onPress={onNext}
+        disabled={
+          !agentName.trim() ||
+          (strategy.id === "custom" && strategyPrompt.trim().length < 20)
+        }
+      >
         Continue to AI Model
       </Button>
       <View style={{ height: 20 }} />
@@ -880,9 +1063,11 @@ function StepReview({
   budget,
   mode,
   params,
+  strategyPrompt,
   selectedModel,
   timeHorizon,
   isPrivate,
+  aggressive,
   isDeploying,
   atLimit,
   plan,
@@ -897,9 +1082,11 @@ function StepReview({
   budget: number;
   mode: AgentMode;
   params: Record<string, number>;
+  strategyPrompt: string;
   selectedModel: ModelId;
   timeHorizon: TimeHorizonId;
   isPrivate: boolean;
+  aggressive: boolean;
   isDeploying: boolean;
   atLimit: boolean;
   plan: string;
@@ -986,7 +1173,8 @@ function StepReview({
         { label: "AI Model", value: `${model.icon} ${model.name}`, icon: "hardware-chip-outline" },
         { label: "Time Horizon", value: `${horizon.icon} ${horizon.name} (${horizon.subtitle})`, icon: "time-outline" },
         { label: "Visibility", value: isPrivate ? "Private" : "Public", icon: isPrivate ? "eye-off-outline" : "eye-outline" },
-        { label: "Initial Status", value: "Backtesting", icon: "time-outline" },
+        { label: "Aggressive Mode", value: aggressive ? "On — looser signals" : "Off — default", icon: "flash-outline" },
+        { label: "Initial Status", value: "Active — auto-trading enabled", icon: "flash-outline" },
       ].map((row) => (
         <View
           key={row.label}
@@ -1007,33 +1195,56 @@ function StepReview({
         </View>
       ))}
 
-      {/* Params Summary */}
-      <View
-        style={{
-          backgroundColor: colors.cardSecondary,
-          borderRadius: 14,
-          padding: 14,
-          gap: 10,
-        }}
-      >
-        <Text style={{ color: colors.textSecondary, fontSize: 12, fontWeight: "600", textTransform: "uppercase", letterSpacing: 0.5 }}>
-          Parameters
-        </Text>
-        {strategy.params.map((p) => {
-          const val = params[p.key] ?? p.default;
-          return (
-            <View key={p.key} style={{ flexDirection: "row", justifyContent: "space-between" }}>
-              <Text style={{ color: colors.textSecondary, fontSize: 13 }}>{p.label}</Text>
-              <Text style={{ color: colors.text, fontSize: 13, fontWeight: "600" }}>
-                {p.unit.startsWith("$") ? `$${val}` : `${val}${p.unit}`}
-              </Text>
-            </View>
-          );
-        })}
-      </View>
+      {/* Params Summary or Custom Instructions */}
+      {strategy.id === "custom" ? (
+        <View
+          style={{
+            backgroundColor: Colors.accentBg,
+            borderRadius: 14,
+            padding: 14,
+            gap: 8,
+            borderWidth: 1,
+            borderColor: Colors.accent + "40",
+          }}
+        >
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+            <Ionicons name="create-outline" size={14} color={Colors.accentLight} />
+            <Text style={{ color: Colors.accentLight, fontSize: 12, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.5 }}>
+              Strategy Instructions
+            </Text>
+          </View>
+          <Text style={{ color: Colors.accentLight, fontSize: 13, lineHeight: 19, opacity: 0.9 }}>
+            {strategyPrompt}
+          </Text>
+        </View>
+      ) : strategy.params.length > 0 ? (
+        <View
+          style={{
+            backgroundColor: colors.cardSecondary,
+            borderRadius: 14,
+            padding: 14,
+            gap: 10,
+          }}
+        >
+          <Text style={{ color: colors.textSecondary, fontSize: 12, fontWeight: "600", textTransform: "uppercase", letterSpacing: 0.5 }}>
+            Parameters
+          </Text>
+          {strategy.params.map((p) => {
+            const val = params[p.key] ?? p.default;
+            return (
+              <View key={p.key} style={{ flexDirection: "row", justifyContent: "space-between" }}>
+                <Text style={{ color: colors.textSecondary, fontSize: 13 }}>{p.label}</Text>
+                <Text style={{ color: colors.text, fontSize: 13, fontWeight: "600" }}>
+                  {p.unit.startsWith("$") ? `$${val}` : `${val}${p.unit}`}
+                </Text>
+              </View>
+            );
+          })}
+        </View>
+      ) : null}
 
       <Text style={{ color: colors.textTertiary, fontSize: 12, textAlign: "center", lineHeight: 18 }}>
-        Your agent will run a backtest first, then automatically switch to {mode} trading once complete.
+        Your agent will start trading automatically during market hours (Mon–Fri, 9:30 AM–4 PM ET). You can pause it anytime.
       </Text>
 
       <Button

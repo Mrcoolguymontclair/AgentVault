@@ -32,7 +32,7 @@ export interface Agent {
   description: string;
   maxDrawdown: number;
   sharpeRatio: number;
-  config: Record<string, number>;
+  config: Record<string, number | string>;
   budget: number;
   isPrivate: boolean;
   modelId: ModelId;

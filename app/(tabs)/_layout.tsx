@@ -4,6 +4,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { View, Text, Platform } from "react-native";
 import { useTheme } from "@/hooks/useTheme";
 import { Colors } from "@/constants/colors";
+import { useDebugStore } from "@/store/debugStore";
 
 type IoniconName = keyof typeof Ionicons.glyphMap;
 
@@ -51,6 +52,7 @@ function TabIcon({ name, focused, label, color }: TabIconProps) {
 
 export default function TabsLayout() {
   const { colors, isDark } = useTheme();
+  const { devMode } = useDebugStore();
 
   return (
     <Tabs
@@ -113,6 +115,16 @@ export default function TabsLayout() {
           title: "Settings",
           tabBarIcon: ({ focused, color }) => (
             <TabIcon name="settings-outline" focused={focused} label="Settings" color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="debug"
+        options={{
+          title: "Debug",
+          href: devMode ? undefined : null,
+          tabBarIcon: ({ focused, color }) => (
+            <TabIcon name="construct-outline" focused={focused} label="Debug" color={color} />
           ),
         }}
       />

@@ -9,6 +9,7 @@ import {
   Share,
   Alert,
 } from "react-native";
+import { useDebugStore } from "@/store/debugStore";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useTheme } from "@/hooks/useTheme";
@@ -44,10 +45,24 @@ export default function SettingsScreen() {
   const { signOut, user: authUser } = useAuthStore();
   const { agents } = useAgentStore();
   const { preferences, unreadCount, updatePreferences } = useNotificationStore();
+  const { devMode, setDevMode } = useDebugStore();
+  const [versionTapCount, setVersionTapCount] = useState(0);
   const [showSignOutModal, setShowSignOutModal] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
+
+  function handleVersionTap() {
+    const next = versionTapCount + 1;
+    if (next >= 7) {
+      const enabling = !devMode;
+      setDevMode(enabling);
+      setVersionTapCount(0);
+      Alert.alert("Developer Mode", enabling ? "Developer Mode Enabled" : "Developer Mode Disabled");
+    } else {
+      setVersionTapCount(next);
+    }
+  }
 
   const plan = ((authUser?.user_metadata?.plan as Plan) ?? "free");
   const planLabel = PLAN_LABELS[plan] ?? "Free";
@@ -369,20 +384,6 @@ export default function SettingsScreen() {
             )}
           </SettingsSection>
 
-          {/* Trading / Integrations */}
-          <SettingsSection title="Trading" colors={colors}>
-            <SettingsRow
-              icon="trending-up-outline"
-              iconBg="rgba(255,169,77,0.12)"
-              iconColor={Colors.warning}
-              label="Alpaca API Keys"
-              subtitle="Connect for live trading"
-              colors={colors}
-              onPress={() => router.push("/alpaca-setup" as any)}
-              chevron
-            />
-          </SettingsSection>
-
           {/* Account */}
           <SettingsSection title="Account" colors={colors}>
             <SettingsRow
@@ -427,10 +428,10 @@ export default function SettingsScreen() {
           {/* Support */}
           <SettingsSection title="Support" colors={colors}>
             {[
-              { icon: "help-circle-outline" as const, label: "Help Center", iconColor: colors.textSecondary, iconBg: colors.cardSecondary },
-              { icon: "chatbubble-outline" as const, label: "Contact Support", iconColor: colors.textSecondary, iconBg: colors.cardSecondary },
-              { icon: "document-text-outline" as const, label: "Terms of Service", iconColor: colors.textSecondary, iconBg: colors.cardSecondary },
-              { icon: "shield-outline" as const, label: "Privacy Policy", iconColor: colors.textSecondary, iconBg: colors.cardSecondary },
+              { icon: "help-circle-outline" as const, label: "Help Center", iconColor: colors.textSecondary, iconBg: colors.cardSecondary, onPress: undefined },
+              { icon: "chatbubble-outline" as const, label: "Contact Support", iconColor: colors.textSecondary, iconBg: colors.cardSecondary, onPress: undefined },
+              { icon: "document-text-outline" as const, label: "Terms of Service", iconColor: colors.textSecondary, iconBg: colors.cardSecondary, onPress: () => router.push("/legal/terms" as any) },
+              { icon: "shield-outline" as const, label: "Privacy Policy", iconColor: colors.textSecondary, iconBg: colors.cardSecondary, onPress: () => router.push("/legal/privacy" as any) },
             ].map((item, i) => (
               <React.Fragment key={item.label}>
                 {i > 0 && <Divider colors={colors} />}
@@ -440,11 +441,46 @@ export default function SettingsScreen() {
                   iconColor={item.iconColor}
                   label={item.label}
                   colors={colors}
+                  onPress={item.onPress}
                   chevron
                 />
               </React.Fragment>
             ))}
           </SettingsSection>
+
+          {/* Developer Section (only visible in dev mode) */}
+          {devMode && (
+            <SettingsSection title="Developer" colors={colors}>
+              <SettingsRow
+                icon="construct-outline"
+                iconBg={Colors.warningBg}
+                iconColor={Colors.warning}
+                label="Debug Console"
+                subtitle="Developer tools & logs"
+                colors={colors}
+                onPress={() => router.push("/(tabs)/debug" as any)}
+                chevron
+              />
+              <Divider colors={colors} />
+              <SettingsRow
+                icon="power-outline"
+                iconBg="rgba(255,59,48,0.10)"
+                iconColor={Colors.danger}
+                label="Developer Mode"
+                subtitle="Tap version 7x to toggle"
+                colors={colors}
+                right={
+                  <Switch
+                    value={devMode}
+                    onValueChange={(v) => setDevMode(v)}
+                    trackColor={{ false: colors.cardBorder, true: "rgba(255,59,48,0.25)" }}
+                    thumbColor={devMode ? Colors.danger : colors.textTertiary}
+                    ios_backgroundColor={colors.cardBorder}
+                  />
+                }
+              />
+            </SettingsSection>
+          )}
 
           {/* App Info */}
           <Card>
@@ -452,9 +488,11 @@ export default function SettingsScreen() {
               <Text style={{ color: Colors.accentLight, fontWeight: "800", fontSize: 18, letterSpacing: -0.5 }}>
                 AgentVault
               </Text>
-              <Text style={{ color: colors.textTertiary, fontSize: 12 }}>
-                Version 1.0.0 (Build 1) · Expo SDK 55
-              </Text>
+              <Pressable onPress={handleVersionTap} hitSlop={8}>
+                <Text style={{ color: colors.textTertiary, fontSize: 12 }}>
+                  Version 1.0.0 (Build 1) · Expo SDK 55
+                </Text>
+              </Pressable>
               <Text style={{ color: colors.textTertiary, fontSize: 12, marginTop: 4 }}>
                 Powered by Groq + Alpaca Markets
               </Text>

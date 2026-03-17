@@ -5,7 +5,8 @@ export type StrategyId =
   | "mean_reversion"
   | "news_sentiment"
   | "prediction_arb"
-  | "dca_plus";
+  | "dca_plus"
+  | "custom";
 
 export type ModelId = "groq_llama" | "claude_haiku" | "claude_sonnet";
 
@@ -176,6 +177,17 @@ export const STRATEGIES: Strategy[] = [
       { key: "dip_multiplier", label: "Dip Multiplier", hint: "Multiply on dip (×)", min: 1, max: 4, step: 1, unit: "×", default: 2 },
       { key: "dip_threshold", label: "Dip Threshold", hint: "Price drop to trigger dip buy", min: 1, max: 15, step: 1, unit: "%", default: 3 },
     ],
+  },
+  {
+    id: "custom",
+    name: "Custom Strategy",
+    tagline: "Your rules, AI execution",
+    description:
+      "Write your own trading rules in plain English. The AI reads your instructions and current market data on every run to decide whether to trade.",
+    icon: "✏️",
+    risk: "medium",
+    nameSuggestions: ["My Strategy", "Alpha Rules", "Custom Bot", "Rule Engine", "My Playbook"],
+    params: [],
   },
 ];
 

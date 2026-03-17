@@ -57,3 +57,49 @@ export function momentumPct(closes: number[], days: number): number {
   if (past === 0) return 0;
   return ((recent - past) / past) * 100;
 }
+
+/** Bollinger Bands (upper, middle, lower) over `period` bars */
+export function calculateBollingerBands(
+  closes: number[],
+  period = 20,
+  multiplier = 2
+): { upper: number; middle: number; lower: number } {
+  if (closes.length < period) {
+    const p = closes[closes.length - 1] ?? 0;
+    return { upper: p, middle: p, lower: p };
+  }
+  const slice = closes.slice(-period);
+  const middle = slice.reduce((a, b) => a + b, 0) / period;
+  const variance = slice.reduce((s, v) => s + Math.pow(v - middle, 2), 0) / period;
+  const std = Math.sqrt(variance);
+  return { upper: middle + multiplier * std, middle, lower: middle - multiplier * std };
+}
+
+/** Average volume over `period` bars */
+export function calculateVolumeMA(volumes: number[], period: number): number {
+  if (volumes.length === 0) return 0;
+  const slice = volumes.slice(-Math.min(period, volumes.length));
+  return slice.reduce((a, b) => a + b, 0) / slice.length;
+}
+
+/** SMA slope: positive = SMA is trending up over the last `lookback` bars */
+export function smaSlope(closes: number[], period: number, lookback = 5): number {
+  if (closes.length < period + lookback) return 0;
+  const recentSMA = calculateSMA(closes.slice(-period));
+  const pastSMA = calculateSMA(closes.slice(-(period + lookback), -lookback));
+  return recentSMA - pastSMA;
+}
+
+/** Minimum value over the last `period` entries */
+export function periodLow(values: number[], period: number): number {
+  if (values.length === 0) return 0;
+  const slice = values.slice(-Math.min(period, values.length));
+  return Math.min(...slice);
+}
+
+/** Maximum value over the last `period` entries */
+export function periodHigh(values: number[], period: number): number {
+  if (values.length === 0) return 0;
+  const slice = values.slice(-Math.min(period, values.length));
+  return Math.max(...slice);
+}

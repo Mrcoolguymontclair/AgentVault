@@ -5,7 +5,7 @@ export interface DbAgent {
   strategy: string;
   status: string;
   mode: string;
-  config: Record<string, number>;
+  config: Record<string, number | string>;
   budget: number;
   model_id: string;
   pnl: number;
@@ -13,6 +13,24 @@ export interface DbAgent {
   trades_count: number;
   win_rate: number;
   max_drawdown: number;
+}
+
+export interface AgentLogInsert {
+  agent_id: string;
+  user_id: string;
+  agent_name: string;
+  strategy: string;
+  signal_detected: boolean;
+  signal_symbol?: string;
+  signal_side?: string;
+  ai_reasoning?: string;
+  ai_confidence?: number;
+  action: "traded" | "skipped" | "error";
+  skip_reason?: string;
+  trade_symbol?: string;
+  trade_qty?: number;
+  trade_price?: number;
+  trade_pnl?: number;
 }
 
 export interface BarData {
@@ -28,7 +46,12 @@ export interface BarData {
 export interface TradeSignal {
   symbol: string;
   side: "buy" | "sell";
-  /** Dollar amount to allocate */
+  /**
+   * For buys: percentage of budget (e.g. 10 = 10%).
+   * For sells: dollar value of the position to close.
+   *   - Full sell: pass heldQty * currentPrice.
+   *   - Partial sell: pass partialQty * currentPrice (index.ts calculates qty from dollarAmount).
+   */
   notional: number;
   reason: string;
   strategyConfidence: number;

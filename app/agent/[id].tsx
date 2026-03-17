@@ -17,6 +17,7 @@ import { useTheme } from "@/hooks/useTheme";
 import { useAuthStore } from "@/store/authStore";
 import { useAgentStore } from "@/store/agentStore";
 import { fetchAgentTrades, fetchPublicAgent, type DbTrade } from "@/lib/services/agentService";
+import { fetchLastSignal } from "@/lib/services/debugService";
 import {
   fetchFollowedAgentIds,
   followAgent,
@@ -59,6 +60,7 @@ export default function AgentDetailScreen() {
   const [isFollowing, setIsFollowing] = useState(false);
   const [followCount, setFollowCount] = useState(0);
   const [runResult, setRunResult] = useState<{ title: string; message: string; ok: boolean } | null>(null);
+  const [lastSignalAt, setLastSignalAt] = useState<string | null>(null);
 
   // Fade-in on mount (native driver only — web always visible)
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -120,6 +122,10 @@ export default function AgentDetailScreen() {
       const { data: tradeData } = await fetchAgentTrades(id, 50);
       setTrades(tradeData ?? []);
       setTradesLoading(false);
+
+      // Load last signal timestamp
+      const lastSig = await fetchLastSignal(id);
+      setLastSignalAt(lastSig);
 
       // Load follow state
       if (authUser?.id) {
@@ -297,7 +303,7 @@ export default function AgentDetailScreen() {
   const strategyDef = STRATEGIES.find((s) => s.id === (agent.strategy as StrategyId));
   const modelDef = AI_MODELS.find((m) => m.id === (agent.modelId as ModelId));
   const riskConfig = strategyDef ? RISK_CONFIG[strategyDef.risk] : null;
-  const timeHorizonDef = TIME_HORIZONS.find((h) => h.id === (agent.config?.time_horizon as string ?? "medium")) ?? TIME_HORIZONS[1];
+  const timeHorizonDef = TIME_HORIZONS.find((h) => h.id === (agent.config?.time_horizon ?? "medium")) ?? TIME_HORIZONS[1];
   const isPositive = agent.pnl >= 0;
 
   return (
@@ -356,37 +362,17 @@ export default function AgentDetailScreen() {
           </Pressable>
 
           {isOwnAgent && (
-            <>
-              <Pressable
-                onPress={handleRunNow}
-                disabled={runLoading}
-                style={{
-                  height: 38, paddingHorizontal: 12, borderRadius: 12,
-                  backgroundColor: Colors.accentBg, borderWidth: 1, borderColor: Colors.accent,
-                  alignItems: "center", justifyContent: "center",
-                  flexDirection: "row", gap: 5, opacity: runLoading ? 0.6 : 1,
-                }}
-              >
-                {runLoading
-                  ? <ActivityIndicator size="small" color={Colors.accentLight} />
-                  : <Ionicons name="play-circle" size={15} color={Colors.accentLight} />
-                }
-                <Text style={{ color: Colors.accentLight, fontWeight: "700", fontSize: 13 }}>
-                  {runLoading ? "Running…" : "Run Now"}
-                </Text>
-              </Pressable>
-              <Pressable
-                onPress={handleDelete}
-                hitSlop={12}
-                style={{
-                  width: 38, height: 38, borderRadius: 12,
-                  backgroundColor: Colors.dangerBg,
-                  alignItems: "center", justifyContent: "center",
-                }}
-              >
-                <Ionicons name="trash-outline" size={18} color={Colors.danger} />
-              </Pressable>
-            </>
+            <Pressable
+              onPress={handleDelete}
+              hitSlop={12}
+              style={{
+                width: 38, height: 38, borderRadius: 12,
+                backgroundColor: Colors.dangerBg,
+                alignItems: "center", justifyContent: "center",
+              }}
+            >
+              <Ionicons name="trash-outline" size={18} color={Colors.danger} />
+            </Pressable>
           )}
 
           {!isOwnAgent && (
@@ -458,9 +444,9 @@ export default function AgentDetailScreen() {
         <View style={{ flexDirection: "row", gap: 10 }}>
           {[
             { label: "Trades", value: `${agent.trades}`, icon: "swap-horizontal-outline" },
-            { label: "Win Rate", value: agent.status === "backtesting" ? "—" : `${agent.winRate}%`, icon: "trophy-outline" },
-            { label: "Max DD", value: agent.status === "backtesting" ? "—" : `${agent.maxDrawdown}%`, icon: "trending-down-outline" },
-            { label: "Sharpe", value: agent.status === "backtesting" ? "—" : `${agent.sharpeRatio}`, icon: "analytics-outline" },
+            { label: "Win Rate", value: agent.trades === 0 ? "—" : `${agent.winRate}%`, icon: "trophy-outline" },
+            { label: "Max DD", value: agent.trades === 0 ? "—" : `${agent.maxDrawdown}%`, icon: "trending-down-outline" },
+            { label: "Sharpe", value: agent.trades === 0 ? "—" : `${agent.sharpeRatio}`, icon: "analytics-outline" },
           ].map((s) => (
             <View
               key={s.label}
@@ -479,55 +465,163 @@ export default function AgentDetailScreen() {
           ))}
         </View>
 
-        {/* Backtesting banner removed — no backtesting engine yet */}
-
-        {/* Run Now result banner */}
-        {runResult && (
-          <Pressable
-            onPress={() => setRunResult(null)}
-            style={{
-              backgroundColor: runResult.ok ? Colors.successBg : Colors.dangerBg,
-              borderRadius: 14,
-              padding: 14,
-              borderWidth: 1,
-              borderColor: runResult.ok ? Colors.success : Colors.danger,
-              gap: 4,
-            }}
-          >
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+        {/* ── Own-agent controls ───────────────────────────────── */}
+        {isOwnAgent && (
+          <>
+            {/* Auto-trading status badge */}
+            <View
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                gap: 10,
+                backgroundColor: agent.status === "active" ? Colors.successBg : "rgba(139,143,168,0.12)",
+                borderRadius: 14,
+                padding: 14,
+                borderWidth: 1,
+                borderColor: agent.status === "active" ? Colors.success + "40" : "rgba(139,143,168,0.25)",
+              }}
+            >
               <Ionicons
-                name={runResult.ok ? "checkmark-circle" : "alert-circle"}
-                size={18}
-                color={runResult.ok ? Colors.success : Colors.danger}
+                name={agent.status === "active" ? "flash" : "pause-circle-outline"}
+                size={20}
+                color={agent.status === "active" ? Colors.success : "#8B8FA8"}
               />
-              <Text style={{ color: runResult.ok ? Colors.success : Colors.danger, fontWeight: "700", fontSize: 14, flex: 1 }}>
-                {runResult.title}
-              </Text>
-              <Ionicons name="close" size={14} color={runResult.ok ? Colors.success : Colors.danger} />
+              <View style={{ flex: 1 }}>
+                <Text style={{
+                  color: agent.status === "active" ? Colors.success : "#8B8FA8",
+                  fontWeight: "700", fontSize: 14,
+                }}>
+                  {agent.status === "active" ? "Auto-trading during market hours" : "Paused — not trading"}
+                </Text>
+                <Text style={{ color: colors.textTertiary, fontSize: 12, marginTop: 2 }}>
+                  {agent.status === "active"
+                    ? "Runs every 15 min · Mon–Fri · 9:30 AM–4 PM ET"
+                    : "Resume to enable automatic cron execution"}
+                </Text>
+              </View>
             </View>
-            <Text style={{ color: runResult.ok ? Colors.success : Colors.danger, fontSize: 13, lineHeight: 18, opacity: 0.85, paddingLeft: 26 }}>
-              {runResult.message}
-            </Text>
-          </Pressable>
-        )}
 
-        {/* Own agent — Pause/Resume */}
-        {canToggle && (
-          <Button
-            variant={agent.status === "active" ? "ghost" : "primary"}
-            size="md"
-            onPress={handleToggle}
-            loading={actionLoading}
-            icon={
-              <Ionicons
-                name={agent.status === "active" ? "pause-circle-outline" : "play-circle-outline"}
-                size={18}
-                color={agent.status === "active" ? colors.text : "#fff"}
-              />
-            }
-          >
-            {agent.status === "active" ? "Pause Agent" : "Resume Agent"}
-          </Button>
+            {/* Primary toggle */}
+            {canToggle && (
+              <View
+                style={{
+                  backgroundColor: colors.card,
+                  borderRadius: 16,
+                  borderWidth: 1,
+                  borderColor: colors.cardBorder,
+                  padding: 4,
+                  flexDirection: "row",
+                  gap: 4,
+                }}
+              >
+                {([
+                  { status: "active", label: "Active", icon: "flash" as const },
+                  { status: "paused", label: "Paused", icon: "pause-circle" as const },
+                ] as const).map(({ status, label, icon }) => {
+                  const selected = agent.status === status;
+                  return (
+                    <Pressable
+                      key={status}
+                      onPress={() => !selected && !actionLoading && handleToggle()}
+                      disabled={actionLoading}
+                      style={{
+                        flex: 1,
+                        flexDirection: "row",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        gap: 7,
+                        paddingVertical: 13,
+                        borderRadius: 13,
+                        backgroundColor: selected
+                          ? status === "active" ? Colors.accent : colors.cardSecondary
+                          : "transparent",
+                        opacity: actionLoading ? 0.6 : 1,
+                      }}
+                    >
+                      {actionLoading && selected ? (
+                        <ActivityIndicator size="small" color={status === "active" ? "#fff" : colors.textSecondary} />
+                      ) : (
+                        <Ionicons
+                          name={icon}
+                          size={16}
+                          color={selected ? (status === "active" ? "#fff" : colors.textSecondary) : colors.textTertiary}
+                        />
+                      )}
+                      <Text style={{
+                        fontWeight: "700",
+                        fontSize: 15,
+                        color: selected ? (status === "active" ? "#fff" : colors.text) : colors.textTertiary,
+                      }}>
+                        {label}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            )}
+
+            {/* Test Run result banner */}
+            {runResult && (
+              <Pressable
+                onPress={() => setRunResult(null)}
+                style={{
+                  backgroundColor: runResult.ok ? Colors.successBg : Colors.dangerBg,
+                  borderRadius: 14, padding: 14, borderWidth: 1,
+                  borderColor: runResult.ok ? Colors.success : Colors.danger, gap: 4,
+                }}
+              >
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                  <Ionicons
+                    name={runResult.ok ? "checkmark-circle" : "alert-circle"}
+                    size={18}
+                    color={runResult.ok ? Colors.success : Colors.danger}
+                  />
+                  <Text style={{ color: runResult.ok ? Colors.success : Colors.danger, fontWeight: "700", fontSize: 14, flex: 1 }}>
+                    {runResult.title}
+                  </Text>
+                  <Ionicons name="close" size={14} color={runResult.ok ? Colors.success : Colors.danger} />
+                </View>
+                <Text style={{ color: runResult.ok ? Colors.success : Colors.danger, fontSize: 13, lineHeight: 18, opacity: 0.85, paddingLeft: 26 }}>
+                  {runResult.message}
+                </Text>
+              </Pressable>
+            )}
+
+            {/* Secondary: Test Run */}
+            <Pressable
+              onPress={handleRunNow}
+              disabled={runLoading}
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 7,
+                paddingVertical: 11,
+                borderRadius: 12,
+                borderWidth: 1,
+                borderColor: colors.cardBorder,
+                backgroundColor: colors.cardSecondary,
+                opacity: runLoading ? 0.6 : 1,
+              }}
+            >
+              {runLoading
+                ? <ActivityIndicator size="small" color={colors.textSecondary} />
+                : <Ionicons name="play-circle-outline" size={16} color={colors.textSecondary} />
+              }
+              <Text style={{ color: colors.textSecondary, fontWeight: "600", fontSize: 14 }}>
+                {runLoading ? "Running…" : "Test Run"}
+              </Text>
+              <View style={{
+                backgroundColor: colors.cardBorder,
+                paddingHorizontal: 6, paddingVertical: 2,
+                borderRadius: 5, marginLeft: 2,
+              }}>
+                <Text style={{ color: colors.textTertiary, fontSize: 10, fontWeight: "700" }}>
+                  FORCES EXECUTE
+                </Text>
+              </View>
+            </Pressable>
+          </>
         )}
 
         {/* Configuration */}
@@ -563,8 +657,59 @@ export default function AgentDetailScreen() {
               icon={agent.isPrivate ? "eye-off-outline" : "eye-outline"}
               colors={colors}
             />
+            {agent.config.aggressive_mode && (
+              <InfoRow
+                label="Aggressive Mode"
+                value="On — looser signals"
+                icon="flash-outline"
+                colors={colors}
+              />
+            )}
+            <InfoRow
+              label="Last Signal"
+              value={lastSignalAt
+                ? new Date(lastSignalAt).toLocaleString("en-US", {
+                    month: "short", day: "numeric",
+                    hour: "2-digit", minute: "2-digit",
+                  })
+                : "No signal yet"}
+              icon="radio-outline"
+              colors={colors}
+            />
 
-            {Object.keys(agent.config).length > 0 && (
+            {agent.strategy === "custom" && agent.config.strategy_prompt ? (
+              <>
+                <View style={{ height: 1, backgroundColor: colors.divider, marginVertical: 12 }} />
+                <Text
+                  style={{
+                    color: colors.textTertiary, fontSize: 11, fontWeight: "600",
+                    textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 10,
+                  }}
+                >
+                  Strategy Instructions
+                </Text>
+                <View
+                  style={{
+                    backgroundColor: Colors.accentBg,
+                    borderRadius: 12,
+                    padding: 12,
+                    borderWidth: 1,
+                    borderColor: Colors.accent + "30",
+                    gap: 6,
+                  }}
+                >
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                    <Ionicons name="create-outline" size={13} color={Colors.accentLight} />
+                    <Text style={{ color: Colors.accentLight, fontSize: 11, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.4 }}>
+                      AI-Interpreted Rules
+                    </Text>
+                  </View>
+                  <Text style={{ color: Colors.accentLight, fontSize: 13, lineHeight: 19, opacity: 0.9 }}>
+                    {agent.config.strategy_prompt as string}
+                  </Text>
+                </View>
+              </>
+            ) : strategyDef.params.length > 0 && Object.keys(agent.config).length > 0 ? (
               <>
                 <View style={{ height: 1, backgroundColor: colors.divider, marginVertical: 12 }} />
                 <Text
@@ -587,7 +732,7 @@ export default function AgentDetailScreen() {
                   );
                 })}
               </>
-            )}
+            ) : null}
           </Card>
         )}
 

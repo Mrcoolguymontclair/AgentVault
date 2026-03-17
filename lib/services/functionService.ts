@@ -4,6 +4,10 @@ export interface RunAgentResult {
   ok: boolean;
   message?: string;
   marketClosed?: boolean;
+  processed?: number;
+  succeeded?: number;
+  failed?: number;
+  count?: number;
   results?: Array<{
     agentId: string;
     agentName: string;

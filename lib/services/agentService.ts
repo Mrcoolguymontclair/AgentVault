@@ -17,7 +17,7 @@ export interface DbAgent {
   win_rate: number;
   max_drawdown: number;
   sharpe_ratio: number;
-  config: Record<string, number>;
+  config: Record<string, number | string>;
   budget: number;
   is_private: boolean;
   model_id: ModelId;
@@ -42,7 +42,7 @@ export interface CreateAgentInput {
   strategy: StrategyId;
   description: string;
   mode: AgentMode;
-  config: Record<string, number>;
+  config: Record<string, number | string>;
   budget: number;
   is_private: boolean;
   model_id: ModelId;
