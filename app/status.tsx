@@ -2,10 +2,10 @@
  * /status?key=agentvault2026
  *
  * Public daily trading summary — no login required.
- * Accessible from any browser. Shows today's trades, P&L, per-agent
- * breakdown, and execution logs.
+ * Auto-refreshes every 60 seconds. Shows market status, today's trades,
+ * P&L, per-agent breakdown, and execution logs.
  */
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useRef, useState, useCallback } from "react";
 import {
   View,
   Text,
@@ -20,30 +20,32 @@ import { supabase } from "@/lib/supabase";
 
 // ─── Access gate ──────────────────────────────────────────────────────────────
 const STATUS_KEY = "agentvault2026";
+const AUTO_REFRESH_MS = 60_000;
 
 // ─── Hardcoded dark theme (no ThemeProvider dependency) ──────────────────────
 const C = {
-  bg:          "#080808",
-  card:        "#111111",
-  cardBorder:  "#1E1E1E",
-  divider:     "#1A1A1A",
-  text:        "#FFFFFF",
-  textSub:     "#888888",
-  textTertiary:"#444444",
-  green:       "#00C805",
-  greenBg:     "rgba(0,200,5,0.10)",
-  red:         "#FF3B30",
-  redBg:       "rgba(255,59,48,0.10)",
-  yellow:      "#FF9500",
-  yellowBg:    "rgba(255,149,0,0.10)",
-  accent:      "#22C55E",
-  accentBg:    "rgba(34,197,94,0.10)",
-  blue:        "#3B82F6",
-  blueBg:      "rgba(59,130,246,0.10)",
+  bg:           "#080808",
+  card:         "#111111",
+  cardBorder:   "#1E1E1E",
+  divider:      "#1A1A1A",
+  text:         "#FFFFFF",
+  textSub:      "#888888",
+  textTertiary: "#444444",
+  green:        "#00C805",
+  greenBg:      "rgba(0,200,5,0.10)",
+  red:          "#FF3B30",
+  redBg:        "rgba(255,59,48,0.10)",
+  yellow:       "#FF9500",
+  yellowBg:     "rgba(255,149,0,0.10)",
+  accent:       "#22C55E",
+  accentBg:     "rgba(34,197,94,0.10)",
+  blue:         "#3B82F6",
+  blueBg:       "rgba(59,130,246,0.10)",
 };
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface Summary {
+  today_date:     string;
   total_trades:   number;
   total_pnl:      number;
   winning_trades: number;
@@ -55,7 +57,7 @@ interface Summary {
   worst_pnl:      number | null;
 }
 
-interface AgentBreakdown {
+interface AgentRow {
   agent_id:       string;
   agent_name:     string;
   strategy:       string;
@@ -65,48 +67,92 @@ interface AgentBreakdown {
   pnl_today:      number;
   wins_today:     number;
   win_rate_today: number;
-  last_run:       string | null;
+  last_signal_at: string | null;
 }
 
-interface TradeEntry {
-  id:          string;
-  executed_at: string;
-  agent_name:  string;
-  strategy:    string;
-  symbol:      string;
-  side:        string;
-  quantity:    number;
-  price:       number;
-  pnl:         number;
+interface LogRow {
+  log_id:          string;
+  ts:              string;
+  agent_name:      string;
+  strategy:        string;
+  action:          string;
+  signal_detected: boolean;
+  signal_symbol:   string | null;
+  signal_side:     string | null;
+  skip_reason:     string | null;
+  trade_symbol:    string | null;
+  trade_qty:       number | null;
+  trade_price:     number | null;
+  trade_pnl:       number | null;
+  ai_confidence:   number | null;
+  ai_reasoning:    string | null;
 }
 
-interface LogEntry {
-  id:             string;
-  timestamp:      string;
-  agent_name:     string;
-  strategy:       string;
-  action:         "traded" | "skipped" | "error";
-  signal_detected:boolean;
-  signal_symbol:  string | null;
-  signal_side:    string | null;
-  skip_reason:    string | null;
-  ai_reasoning:   string | null;
-  trade_symbol:   string | null;
-  trade_price:    number | null;
-  trade_pnl:      number | null;
-  ai_confidence:  number | null;
+// ─── Market status helper ─────────────────────────────────────────────────────
+type MarketStatus = "open" | "closed" | "pre" | "after";
+
+function getMarketStatus(): MarketStatus {
+  const now = new Date();
+  // Convert to ET
+  const etStr = now.toLocaleString("en-US", { timeZone: "America/New_York" });
+  const et = new Date(etStr);
+  const day = et.getDay(); // 0=Sun, 6=Sat
+  if (day === 0 || day === 6) return "closed";
+
+  const h = et.getHours();
+  const m = et.getMinutes();
+  const mins = h * 60 + m;
+
+  if (mins < 4 * 60)          return "closed";
+  if (mins < 9 * 60 + 30)     return "pre";
+  if (mins < 16 * 60)         return "open";
+  if (mins < 20 * 60)         return "after";
+  return "closed";
 }
 
-interface StatusData {
-  date:         string;
-  generated_at: string;
-  summary:      Summary;
-  agents:       AgentBreakdown[];
-  trades:       TradeEntry[];
-  logs:         LogEntry[];
+function MarketStatusBadge() {
+  const [status, setStatus] = useState<MarketStatus>(getMarketStatus);
+
+  useEffect(() => {
+    const t = setInterval(() => setStatus(getMarketStatus()), 30_000);
+    return () => clearInterval(t);
+  }, []);
+
+  const cfg: Record<MarketStatus, { label: string; color: string; bg: string }> = {
+    open:   { label: "Market Open",   color: C.green,  bg: C.greenBg },
+    pre:    { label: "Pre-Market",    color: C.yellow, bg: C.yellowBg },
+    after:  { label: "After-Hours",   color: C.yellow, bg: C.yellowBg },
+    closed: { label: "Market Closed", color: C.textSub, bg: C.cardBorder + "80" },
+  };
+  const { label, color, bg } = cfg[status];
+
+  return (
+    <View
+      style={{
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 5,
+        backgroundColor: bg,
+        paddingHorizontal: 10,
+        paddingVertical: 4,
+        borderRadius: 100,
+        borderWidth: 1,
+        borderColor: color + "40",
+      }}
+    >
+      <View
+        style={{
+          width: 6, height: 6, borderRadius: 3,
+          backgroundColor: color,
+          opacity: status === "open" ? 1 : 0.7,
+        }}
+      />
+      <Text style={{ color, fontSize: 11, fontWeight: "700" }}>{label}</Text>
+    </View>
+  );
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 function fmt$(v: number, compact = false): string {
   if (compact && Math.abs(v) >= 1000) {
     return new Intl.NumberFormat("en-US", {
@@ -125,8 +171,8 @@ function fmtTime(iso: string): string {
   });
 }
 
-function fmtDate(iso: string): string {
-  return new Date(iso).toLocaleDateString("en-US", {
+function fmtDate(dateStr: string): string {
+  return new Date(dateStr + "T12:00:00").toLocaleDateString("en-US", {
     weekday: "long", month: "long", day: "numeric", year: "numeric",
     timeZone: "America/New_York",
   });
@@ -146,48 +192,73 @@ function actionColor(action: string): string {
 function strategyLabel(s: string): string {
   const map: Record<string, string> = {
     momentum_rider: "Trend Rider",
-    mean_reversion:  "Bargain Hunter",
-    news_trader:     "News Trader",
-    prediction_arb:  "Prediction Pro",
-    dca_plus:        "Smart DCA",
-    blind_quant:     "Blind Quant",
-    custom:          "Your Rules",
+    mean_reversion: "Bargain Hunter",
+    news_trader:    "News Trader",
+    prediction_arb: "Prediction Pro",
+    dca_plus:       "Smart DCA",
+    blind_quant:    "Blind Quant",
+    custom:         "Your Rules",
   };
   return map[s] ?? s;
 }
 
 // ─── Status page ──────────────────────────────────────────────────────────────
 export default function StatusPage() {
-  const params = useLocalSearchParams<{ key?: string; date?: string }>();
-  const key    = params.key  ?? "";
-  const date   = params.date ?? undefined;
+  const params = useLocalSearchParams<{ key?: string }>();
+  const key    = params.key ?? "";
 
-  const [data,       setData]       = useState<StatusData | null>(null);
+  const [summary,    setSummary]    = useState<Summary | null>(null);
+  const [agents,     setAgents]     = useState<AgentRow[]>([]);
+  const [logs,       setLogs]       = useState<LogRow[]>([]);
   const [loading,    setLoading]    = useState(true);
   const [error,      setError]      = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [logsOpen,   setLogsOpen]   = useState(false);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const accessGranted = key === STATUS_KEY;
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (silent = false) => {
     if (!accessGranted) return;
-    setError(null);
+    if (!silent) setError(null);
     try {
-      const { data: raw, error: rpcErr } = await supabase.rpc("rpc_get_daily_status", {
-        p_date: date ?? null,
-      });
-      if (rpcErr) throw new Error(rpcErr.message);
-      setData(raw as StatusData);
-    } catch (e: any) {
-      setError(e.message ?? "Failed to load status");
-    }
-  }, [accessGranted, date]);
+      const [sumRes, agRes, logRes] = await Promise.all([
+        supabase.rpc("rpc_get_status_summary", { p_secret_key: key }),
+        supabase.rpc("rpc_get_status_agents",  { p_secret_key: key }),
+        supabase.rpc("rpc_get_status_logs",    { p_secret_key: key, p_limit: 50 }),
+      ]);
 
+      if (sumRes.error) throw new Error(sumRes.error.message);
+      if (agRes.error)  throw new Error(agRes.error.message);
+      if (logRes.error) throw new Error(logRes.error.message);
+
+      // Summary RPC returns an array of rows; take the first
+      const sumRows = sumRes.data as Summary[];
+      setSummary(sumRows?.[0] ?? null);
+      setAgents((agRes.data as AgentRow[]) ?? []);
+      setLogs((logRes.data as LogRow[]) ?? []);
+      setLastRefresh(new Date());
+    } catch (e: any) {
+      if (!silent) setError(e.message ?? "Failed to load status");
+    }
+  }, [accessGranted, key]);
+
+  // Initial load
   useEffect(() => {
+    if (!accessGranted) return;
     setLoading(true);
     load().finally(() => setLoading(false));
-  }, [load]);
+  }, [load, accessGranted]);
+
+  // Auto-refresh every 60 s
+  useEffect(() => {
+    if (!accessGranted) return;
+    intervalRef.current = setInterval(() => load(true), AUTO_REFRESH_MS);
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+    };
+  }, [load, accessGranted]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -195,7 +266,7 @@ export default function StatusPage() {
     setRefreshing(false);
   }, [load]);
 
-  // ── Lock screen ───────────────────────────────────────────────────────────
+  // ── Lock screen ─────────────────────────────────────────────────────────────
   if (!accessGranted) {
     return (
       <View style={{ flex: 1, backgroundColor: C.bg, alignItems: "center", justifyContent: "center", padding: 32 }}>
@@ -214,7 +285,7 @@ export default function StatusPage() {
     );
   }
 
-  // ── Loading ───────────────────────────────────────────────────────────────
+  // ── Loading ──────────────────────────────────────────────────────────────────
   if (loading) {
     return (
       <View style={{ flex: 1, backgroundColor: C.bg, alignItems: "center", justifyContent: "center" }}>
@@ -224,33 +295,30 @@ export default function StatusPage() {
     );
   }
 
-  // ── Error ─────────────────────────────────────────────────────────────────
+  // ── Error ────────────────────────────────────────────────────────────────────
   if (error) {
     return (
       <View style={{ flex: 1, backgroundColor: C.bg, alignItems: "center", justifyContent: "center", padding: 32 }}>
         <Text style={{ color: C.red, fontSize: 16, textAlign: "center" }}>⚠ {error}</Text>
-        <Pressable onPress={load} style={{ marginTop: 16 }}>
+        <Pressable onPress={() => load()} style={{ marginTop: 16 }}>
           <Text style={{ color: C.accent, fontWeight: "600" }}>Retry</Text>
         </Pressable>
       </View>
     );
   }
 
-  if (!data) return null;
-
-  const { summary, agents, trades, logs } = data;
-  const hasTrades = trades.length > 0;
+  const isUp      = (summary?.total_pnl ?? 0) >= 0;
   const hasAgents = agents.length > 0;
-  const isUp = summary.total_pnl >= 0;
+  const todayDate = summary?.today_date ?? new Date().toISOString().slice(0, 10);
 
-  // ── Main render ───────────────────────────────────────────────────────────
+  // ── Main render ──────────────────────────────────────────────────────────────
   return (
     <ScrollView
       style={{ flex: 1, backgroundColor: C.bg }}
       contentContainerStyle={{
-        paddingHorizontal: Platform.OS === "web" ? Math.max(16, 0) : 16,
+        paddingHorizontal: 16,
         paddingBottom: 60,
-        maxWidth: 800,
+        maxWidth: 860,
         alignSelf: "center",
         width: "100%",
       }}
@@ -259,9 +327,9 @@ export default function StatusPage() {
       }
       showsVerticalScrollIndicator={false}
     >
-      {/* ── Header ─────────────────────────────────────────────────────────── */}
+      {/* ── Header ──────────────────────────────────────────────────────────── */}
       <View style={{ paddingTop: 28, paddingBottom: 20 }}>
-        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
           <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
             <View
               style={{
@@ -276,98 +344,94 @@ export default function StatusPage() {
               AgentVault
             </Text>
           </View>
+          <MarketStatusBadge />
+        </View>
+
+        <Text style={{ color: C.text, fontSize: 15, fontWeight: "600", marginTop: 14 }}>
+          {fmtDate(todayDate)}
+        </Text>
+
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 4 }}>
+          <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: C.accent }} />
+          <Text style={{ color: C.textSub, fontSize: 12 }}>
+            {lastRefresh
+              ? `Updated ${lastRefresh.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "America/New_York" })} ET · auto-refreshes every 60s`
+              : "Loading…"}
+          </Text>
+        </View>
+      </View>
+
+      {/* ── Summary cards ───────────────────────────────────────────────────── */}
+      {summary ? (
+        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10, marginBottom: 16 }}>
+          {/* Total P&L — hero card */}
           <View
             style={{
-              backgroundColor: C.accentBg,
-              paddingHorizontal: 10,
-              paddingVertical: 4,
-              borderRadius: 100,
+              flex: 1,
+              minWidth: 160,
+              backgroundColor: isUp ? C.greenBg : C.redBg,
+              borderRadius: 16,
               borderWidth: 1,
-              borderColor: C.accent + "40",
+              borderColor: (isUp ? C.green : C.red) + "30",
+              padding: 16,
+              gap: 4,
             }}
           >
-            <Text style={{ color: C.accent, fontSize: 11, fontWeight: "700" }}>
-              Daily Status
+            <Text style={{ color: isUp ? C.green : C.red, fontSize: 11, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.6 }}>
+              Total P&L
+            </Text>
+            <Text style={{ color: isUp ? C.green : C.red, fontSize: 30, fontWeight: "800", letterSpacing: -1 }}>
+              {isUp ? "+" : ""}{fmt$(summary.total_pnl)}
+            </Text>
+            <Text style={{ color: (isUp ? C.green : C.red) + "99", fontSize: 12, fontWeight: "600" }}>
+              {summary.total_trades} trade{summary.total_trades !== 1 ? "s" : ""}
             </Text>
           </View>
-        </View>
-        <Text style={{ color: C.text, fontSize: 15, fontWeight: "600", marginTop: 14 }}>
-          {fmtDate(data.date + "T12:00:00")}
-        </Text>
-        <Text style={{ color: C.textSub, fontSize: 12, marginTop: 2 }}>
-          Updated {new Date(data.generated_at).toLocaleTimeString("en-US", {
-            hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "America/New_York",
-          })} ET
-        </Text>
-      </View>
 
-      {/* ── Summary cards ──────────────────────────────────────────────────── */}
-      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10, marginBottom: 16 }}>
-        {/* Total P&L — hero card */}
-        <View
-          style={{
-            flex: 1,
-            minWidth: 160,
-            backgroundColor: isUp ? C.greenBg : C.redBg,
-            borderRadius: 16,
-            borderWidth: 1,
-            borderColor: (isUp ? C.green : C.red) + "30",
-            padding: 16,
-            gap: 4,
-          }}
-        >
-          <Text style={{ color: isUp ? C.green : C.red, fontSize: 11, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.6 }}>
-            Total P&L
-          </Text>
-          <Text style={{ color: isUp ? C.green : C.red, fontSize: 30, fontWeight: "800", letterSpacing: -1 }}>
-            {isUp ? "+" : ""}{fmt$(summary.total_pnl)}
-          </Text>
-          <Text style={{ color: (isUp ? C.green : C.red) + "99", fontSize: 12, fontWeight: "600" }}>
-            {summary.total_trades} trade{summary.total_trades !== 1 ? "s" : ""}
-          </Text>
-        </View>
-
-        {/* Win Rate */}
-        <View style={[styles.summaryCard, { minWidth: 120 }]}>
-          <Text style={styles.summaryLabel}>Win Rate</Text>
-          <Text style={[styles.summaryValue, {
-            color: summary.win_rate >= 55 ? C.green : summary.win_rate >= 45 ? C.yellow : C.red,
-          }]}>
-            {summary.total_trades > 0 ? `${summary.win_rate}%` : "—"}
-          </Text>
-          <Text style={styles.summaryHint}>
-            {summary.winning_trades}W / {summary.losing_trades}L
-          </Text>
-        </View>
-
-        {/* Best trade */}
-        <View style={[styles.summaryCard, { minWidth: 130 }]}>
-          <Text style={styles.summaryLabel}>Best Trade</Text>
-          <Text style={[styles.summaryValue, { color: C.green, fontSize: 18 }]}>
-            {summary.best_symbol ?? "—"}
-          </Text>
-          {summary.best_pnl !== null && (
-            <Text style={{ color: C.green, fontSize: 13, fontWeight: "700" }}>
-              +{fmt$(summary.best_pnl)}
+          {/* Win Rate */}
+          <View style={[styles.summaryCard, { minWidth: 120 }]}>
+            <Text style={styles.summaryLabel}>Win Rate</Text>
+            <Text style={[styles.summaryValue, {
+              color: summary.win_rate >= 55 ? C.green : summary.win_rate >= 45 ? C.yellow : C.red,
+            }]}>
+              {summary.total_trades > 0 ? `${summary.win_rate}%` : "—"}
             </Text>
-          )}
-        </View>
-
-        {/* Worst trade */}
-        <View style={[styles.summaryCard, { minWidth: 130 }]}>
-          <Text style={styles.summaryLabel}>Worst Trade</Text>
-          <Text style={[styles.summaryValue, { color: C.red, fontSize: 18 }]}>
-            {summary.worst_symbol ?? "—"}
-          </Text>
-          {summary.worst_pnl !== null && summary.worst_pnl < 0 && (
-            <Text style={{ color: C.red, fontSize: 13, fontWeight: "700" }}>
-              {fmt$(summary.worst_pnl)}
+            <Text style={styles.summaryHint}>
+              {summary.winning_trades}W / {summary.losing_trades}L
             </Text>
-          )}
-        </View>
-      </View>
+          </View>
 
-      {/* ── Per-agent breakdown ─────────────────────────────────────────────── */}
+          {/* Best trade */}
+          <View style={[styles.summaryCard, { minWidth: 130 }]}>
+            <Text style={styles.summaryLabel}>Best Trade</Text>
+            <Text style={[styles.summaryValue, { color: C.green, fontSize: 18 }]}>
+              {summary.best_symbol ?? "—"}
+            </Text>
+            {summary.best_pnl !== null && (
+              <Text style={{ color: C.green, fontSize: 13, fontWeight: "700" }}>
+                +{fmt$(summary.best_pnl)}
+              </Text>
+            )}
+          </View>
+
+          {/* Worst trade */}
+          <View style={[styles.summaryCard, { minWidth: 130 }]}>
+            <Text style={styles.summaryLabel}>Worst Trade</Text>
+            <Text style={[styles.summaryValue, { color: C.red, fontSize: 18 }]}>
+              {summary.worst_symbol ?? "—"}
+            </Text>
+            {summary.worst_pnl !== null && summary.worst_pnl < 0 && (
+              <Text style={{ color: C.red, fontSize: 13, fontWeight: "700" }}>
+                {fmt$(summary.worst_pnl)}
+              </Text>
+            )}
+          </View>
+        </View>
+      ) : (
+        <EmptyCard message="No trading activity today." />
+      )}
+
+      {/* ── Per-agent breakdown ──────────────────────────────────────────────── */}
       <SectionTitle title="Agents" count={agents.length} />
       {!hasAgents ? (
         <EmptyCard message="No agent activity today." />
@@ -375,8 +439,14 @@ export default function StatusPage() {
         <View style={styles.card}>
           {/* Table header */}
           <View style={[styles.tableRow, { backgroundColor: C.cardBorder + "80", borderBottomWidth: 1, borderBottomColor: C.divider }]}>
-            {["Agent", "Strategy", "Trades", "P&L", "Win %", "Last Run"].map((h) => (
-              <Text key={h} style={[styles.tableHeader, h === "Agent" || h === "Strategy" ? { flex: 2 } : { flex: 1, textAlign: "right" }]}>
+            {["Agent", "Strategy", "Trades", "P&L", "Win %", "Last Signal"].map((h) => (
+              <Text
+                key={h}
+                style={[
+                  styles.tableHeader,
+                  h === "Agent" || h === "Strategy" ? { flex: 2 } : { flex: 1, textAlign: "right" },
+                ]}
+              >
                 {h}
               </Text>
             ))}
@@ -409,13 +479,25 @@ export default function StatusPage() {
                 </Text>
                 <Text style={[styles.tableCell, { flex: 1 }]}>{ag.trades_today}</Text>
                 <Text style={[styles.tableCell, { flex: 1, color: pnlColor(ag.pnl_today) }]}>
-                  {ag.trades_today > 0 ? `${ag.pnl_today >= 0 ? "+" : ""}${fmt$(ag.pnl_today, true)}` : "—"}
+                  {ag.trades_today > 0
+                    ? `${ag.pnl_today >= 0 ? "+" : ""}${fmt$(ag.pnl_today, true)}`
+                    : "—"}
                 </Text>
-                <Text style={[styles.tableCell, { flex: 1, color: ag.trades_today > 0 ? (ag.win_rate_today >= 50 ? C.green : C.red) : C.textSub }]}>
+                <Text
+                  style={[
+                    styles.tableCell,
+                    {
+                      flex: 1,
+                      color: ag.trades_today > 0
+                        ? ag.win_rate_today >= 50 ? C.green : C.red
+                        : C.textSub,
+                    },
+                  ]}
+                >
                   {ag.trades_today > 0 ? `${ag.win_rate_today}%` : "—"}
                 </Text>
                 <Text style={[styles.tableCell, { flex: 1, color: C.textSub, fontSize: 10 }]}>
-                  {ag.last_run ? fmtTime(ag.last_run) : "—"}
+                  {ag.last_signal_at ? fmtTime(ag.last_signal_at) : "—"}
                 </Text>
               </View>
               {i < agents.length - 1 && <View style={styles.divider} />}
@@ -424,66 +506,8 @@ export default function StatusPage() {
         </View>
       )}
 
-      {/* ── Trades list ────────────────────────────────────────────────────── */}
-      <SectionTitle title="Trades" count={trades.length} />
-      {!hasTrades ? (
-        <EmptyCard message="No trades executed today." />
-      ) : (
-        <View style={styles.card}>
-          {/* Table header */}
-          <View style={[styles.tableRow, { backgroundColor: C.cardBorder + "80", borderBottomWidth: 1, borderBottomColor: C.divider }]}>
-            {["Time", "Agent", "Symbol", "Side", "Qty", "Price", "P&L"].map((h) => (
-              <Text key={h} style={[styles.tableHeader, h === "Agent" ? { flex: 2 } : { flex: 1, textAlign: h === "Time" || h === "Symbol" || h === "Side" ? "left" : "right" }]}>
-                {h}
-              </Text>
-            ))}
-          </View>
-          {trades.map((tr, i) => {
-            const isBuy = tr.side === "buy";
-            return (
-              <View key={tr.id}>
-                <View style={styles.tableRow}>
-                  <Text style={[styles.tableCell, { flex: 1, fontSize: 11, color: C.textSub }]}>
-                    {fmtTime(tr.executed_at)}
-                  </Text>
-                  <Text style={[styles.tableCell, { flex: 2, fontSize: 12 }]} numberOfLines={1}>
-                    {tr.agent_name}
-                  </Text>
-                  <Text style={[styles.tableCell, { flex: 1, fontWeight: "700" }]}>
-                    {tr.symbol}
-                  </Text>
-                  <View style={{ flex: 1 }}>
-                    <View
-                      style={{
-                        backgroundColor: isBuy ? C.greenBg : C.redBg,
-                        paddingHorizontal: 6, paddingVertical: 2, borderRadius: 5,
-                        alignSelf: "flex-start",
-                      }}
-                    >
-                      <Text style={{ color: isBuy ? C.green : C.red, fontSize: 10, fontWeight: "800" }}>
-                        {tr.side.toUpperCase()}
-                      </Text>
-                    </View>
-                  </View>
-                  <Text style={[styles.tableCell, { flex: 1, textAlign: "right" }]}>
-                    {Number(tr.quantity).toFixed(3)}
-                  </Text>
-                  <Text style={[styles.tableCell, { flex: 1, textAlign: "right" }]}>
-                    {fmt$(Number(tr.price))}
-                  </Text>
-                  <Text style={[styles.tableCell, { flex: 1, textAlign: "right", color: pnlColor(Number(tr.pnl)), fontWeight: "700" }]}>
-                    {Number(tr.pnl) === 0 ? "—" : `${Number(tr.pnl) >= 0 ? "+" : ""}${fmt$(Number(tr.pnl), true)}`}
-                  </Text>
-                </View>
-                {i < trades.length - 1 && <View style={styles.divider} />}
-              </View>
-            );
-          })}
-        </View>
-      )}
-
-      {/* ── Agent Logs ─────────────────────────────────────────────────────── */}
-      <Pressable onPress={() => setLogsOpen((o) => !o)} style={{ marginBottom: 0 }}>
+      {/* ── Execution Logs (collapsible) ─────────────────────────────────────── */}
+      <Pressable onPress={() => setLogsOpen((o) => !o)}>
         <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 24, marginBottom: 10 }}>
           <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
             <Text style={{ color: C.text, fontSize: 16, fontWeight: "800" }}>Execution Logs</Text>
@@ -503,8 +527,8 @@ export default function StatusPage() {
         ) : (
           <View style={[styles.card, { gap: 0 }]}>
             {logs.map((log, i) => (
-              <View key={log.id}>
-                <LogRow log={log} />
+              <View key={log.log_id}>
+                <LogRowItem log={log} />
                 {i < logs.length - 1 && <View style={styles.divider} />}
               </View>
             ))}
@@ -512,10 +536,10 @@ export default function StatusPage() {
         )
       )}
 
-      {/* ── Footer ─────────────────────────────────────────────────────────── */}
+      {/* ── Footer ──────────────────────────────────────────────────────────── */}
       <View style={{ marginTop: 32, alignItems: "center", gap: 4 }}>
         <Text style={{ color: C.textTertiary, fontSize: 11 }}>
-          AgentVault · All times in ET · Pull to refresh
+          AgentVault · All times in ET · Pull to refresh · Auto-refreshes every 60s
         </Text>
         <Text style={{ color: C.textTertiary, fontSize: 10 }}>
           Paper trading data — not real money
@@ -525,8 +549,8 @@ export default function StatusPage() {
   );
 }
 
-// ─── LogRow ───────────────────────────────────────────────────────────────────
-function LogRow({ log }: { log: LogEntry }) {
+// ─── LogRowItem ───────────────────────────────────────────────────────────────
+function LogRowItem({ log }: { log: LogRow }) {
   const [expanded, setExpanded] = useState(false);
   const aColor = actionColor(log.action);
 
@@ -534,7 +558,6 @@ function LogRow({ log }: { log: LogEntry }) {
     <Pressable onPress={() => setExpanded((e) => !e)} style={{ padding: 12 }}>
       {/* Top row */}
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        {/* Action badge */}
         <View
           style={{
             backgroundColor: aColor + "18",
@@ -570,7 +593,7 @@ function LogRow({ log }: { log: LogEntry }) {
         )}
 
         <Text style={{ color: C.textSub, fontSize: 11, marginLeft: "auto" }}>
-          {fmtTime(log.timestamp)}
+          {fmtTime(log.ts)}
         </Text>
       </View>
 
@@ -607,14 +630,12 @@ function LogRow({ log }: { log: LogEntry }) {
         )}
       </View>
 
-      {/* Skip reason */}
       {log.skip_reason && (
         <Text style={{ color: C.textSub, fontSize: 11, marginTop: 4, fontStyle: "italic" }}>
           {log.skip_reason.slice(0, 120)}
         </Text>
       )}
 
-      {/* Expanded: AI reasoning */}
       {expanded && log.ai_reasoning && (
         <View
           style={{
@@ -648,7 +669,7 @@ function LogRow({ log }: { log: LogEntry }) {
   );
 }
 
-// ─── Reusable pieces ──────────────────────────────────────────────────────────
+// ─── Shared components ────────────────────────────────────────────────────────
 function SectionTitle({ title, count }: { title: string; count: number }) {
   return (
     <View style={{ flexDirection: "row", alignItems: "center", gap: 8, marginTop: 24, marginBottom: 10 }}>
@@ -662,18 +683,13 @@ function SectionTitle({ title, count }: { title: string; count: number }) {
 
 function EmptyCard({ message }: { message: string }) {
   return (
-    <View
-      style={[
-        styles.card,
-        { alignItems: "center", paddingVertical: 24, borderStyle: "dashed" },
-      ]}
-    >
+    <View style={[styles.card, { alignItems: "center", paddingVertical: 24, borderStyle: "dashed" }]}>
       <Text style={{ color: C.textSub, fontSize: 13 }}>{message}</Text>
     </View>
   );
 }
 
-// ─── Stylesheet objects (plain objects, not StyleSheet.create — avoids web quirks) ──
+// ─── Styles ───────────────────────────────────────────────────────────────────
 const styles = {
   card: {
     backgroundColor: C.card,

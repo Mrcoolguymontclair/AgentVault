@@ -124,7 +124,7 @@ LANGUAGE sql SECURITY DEFINER SET search_path = public AS $$
   ),
   -- Portfolio snapshots aggregated by date for Sharpe + Max DD
   snap_daily AS (
-    SELECT snapshot_date, SUM(portfolio_value) AS port_value
+    SELECT snapshot_date, SUM(value) AS port_value
     FROM portfolio_snapshots
     WHERE user_id = p_user_id
     GROUP BY snapshot_date

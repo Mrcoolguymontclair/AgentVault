@@ -304,6 +304,13 @@ function AppLoader() {
             animation: Platform.OS === "web" ? "none" : "slide_from_right",
           }}
         />
+        <Stack.Screen
+          name="status"
+          options={{
+            headerShown: false,
+            animation: Platform.OS === "web" ? "none" : "fade",
+          }}
+        />
       </Stack>
       <OfflineBanner />
     </>
