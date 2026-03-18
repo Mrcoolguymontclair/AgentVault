@@ -42,11 +42,12 @@ function AuthRouter() {
     const inOnboarding = seg0 === "onboarding";
     const inTabs = seg0 === "(tabs)";
     // Deep routes (agent detail, trader profile) — don't touch these
+    // "status" is a public page — never redirect it to login
     const inDeepRoute =
       seg0 === "agent" || seg0 === "trader" ||
       seg0 === "notifications" || seg0 === "subscription" ||
       seg0 === "profile-edit" || seg0 === "alpaca-setup" ||
-      seg0 === "legal";
+      seg0 === "legal" || seg0 === "status";
 
     if (!session) {
       if (!inAuth) router.replace("/auth/login");
