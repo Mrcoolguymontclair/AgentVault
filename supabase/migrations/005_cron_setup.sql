@@ -24,7 +24,7 @@ select cron.schedule(
                  'Content-Type',  'application/json',
                  'Authorization', 'Bearer ' || current_setting('app.supabase_service_role_key', true)
                ),
-    body    => '{}'::jsonb,
+    body    => '{"force": true}'::jsonb,
     timeout_milliseconds => 55000
   );
   $$

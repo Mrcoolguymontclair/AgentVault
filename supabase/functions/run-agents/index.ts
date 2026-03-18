@@ -2,7 +2,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { isMarketOpen } from "./market-utils.ts";
 import { confirmTrade } from "./groq.ts";
 import { placeOrder, getPositions } from "./alpaca.ts";
-import { runStrategy, clearMarketCache } from "./strategies.ts";
+import { runStrategy, clearMarketCache, getLastStrategyDiagnostics } from "./strategies.ts";
 import { initTracker, setCurrentAgent } from "./groq-tracker.ts";
 import type { DbAgent, ExecutionResult, AgentLogInsert } from "./types.ts";
 
@@ -16,12 +16,15 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SUPABASE_SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 
 Deno.serve(async (req) => {
+  const rawBody = await req.text().catch(() => "");
+  console.log(`[run-agents] invoked method=${req.method} hasAuth=${!!req.headers.get("authorization")} body=${rawBody}`);
+
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: CORS });
   }
 
   try {
-    const body = await req.json().catch(() => ({})) as {
+    const body = (rawBody ? JSON.parse(rawBody) : {}) as {
       agent_id?: string;
       force?: boolean;
     };
@@ -186,7 +189,11 @@ async function runAgent(
     // ── Run strategy ─────────────────────────────────────────
     const signal = await runStrategy(agent.strategy, enrichedConfig, agentPositions, agentAvgCost);
     if (!signal) {
-      await logExecution(supabase, agent, { action: "skipped", skip_reason: "No signal generated" });
+      await logExecution(supabase, agent, {
+        action: "skipped",
+        skip_reason: "No signal generated",
+        ai_reasoning: getLastStrategyDiagnostics(),
+      });
       return { ...base, skipped: true, skipReason: "No signal generated" };
     }
 

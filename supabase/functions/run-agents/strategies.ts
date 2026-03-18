@@ -24,6 +24,11 @@ export function clearMarketCache(): void {
   _barsCache.clear();
 }
 
+// Last-run strategy diagnostics — written by strategy functions, read by index.ts
+// to populate ai_reasoning even when no signal is generated.
+let _lastStrategyDiagnostics = "";
+export function getLastStrategyDiagnostics(): string { return _lastStrategyDiagnostics; }
+
 /** Drop-in replacement for getDailyBars that serves from the in-memory cache. */
 async function getDailyBars(symbol: string, count: number): Promise<BarData[]> {
   const cached = _barsCache.get(symbol);
@@ -108,10 +113,14 @@ export async function momentumRider(
 
   let bestSignal: TradeSignal | null = null;
   let bestStrength = 0;
+  const diagLines: string[] = [];
 
   for (const symbol of WATCHLIST) {
     const bars = await getDailyBars(symbol, lookback + volPeriod + 5);
-    if (bars.length < lookback + 5) continue;
+    if (bars.length < lookback + 5) {
+      diagLines.push(`${symbol}: only ${bars.length} bars (need ${lookback + 5})`);
+      continue;
+    }
 
     const closes = bars.map((b) => b.c);
     const volumes = bars.map((b) => b.v);
@@ -126,6 +135,7 @@ export async function momentumRider(
     const avgVol = calculateVolumeMA(volumes.slice(0, -1), volPeriod);
     const todayVol = volumes[volumes.length - 1];
     const volumeConfirmed = avgVol > 0 && todayVol >= avgVol * volRequired;
+    const volRatio = avgVol > 0 ? todayVol / avgVol : 0;
 
     // SMA slope: positive = uptrend (aggressive allows slight negative slope)
     const slope = smaSlope(closes, lookback, Math.min(5, Math.floor(lookback / 3)));
@@ -139,12 +149,25 @@ export async function momentumRider(
 
     if (currentPrice >= sma * (1 - smaBuffer) && heldQty === 0) {
       // Filters: volume, trend, not overextended, not correlated
-      if (!volumeConfirmed) continue;
-      if (!trendUp) continue;
+      if (!volumeConfirmed) {
+        diagLines.push(`${symbol}: $${currentPrice.toFixed(2)} SMA=${sma.toFixed(2)} vol=${volRatio.toFixed(2)}x<${volRequired}x→low_vol`);
+        continue;
+      }
+      if (!trendUp) {
+        diagLines.push(`${symbol}: $${currentPrice.toFixed(2)} SMA=${sma.toFixed(2)} slope=${slope.toFixed(5)}<${slopeMin}→no_trend`);
+        continue;
+      }
       const overextendedCap = aggressive ? 0.08 : 0.05;
-      if (priceVsSma > overextendedCap) continue; // overextended — wait for pullback
-      if (isCorrelated(symbol, held)) continue;
+      if (priceVsSma > overextendedCap) {
+        diagLines.push(`${symbol}: $${currentPrice.toFixed(2)} overextended ${(priceVsSma * 100).toFixed(1)}%>cap ${(overextendedCap * 100).toFixed(0)}%`);
+        continue;
+      }
+      if (isCorrelated(symbol, held)) {
+        diagLines.push(`${symbol}: correlated with held position`);
+        continue;
+      }
 
+      diagLines.push(`${symbol}: BUY signal priceVsSma=${(priceVsSma * 100).toFixed(2)}% vol=${volRatio.toFixed(2)}x`);
       const strength = priceVsSma;
       if (strength > bestStrength) {
         bestStrength = strength;
@@ -154,7 +177,7 @@ export async function momentumRider(
           notional: positionSizePct,
           reason:
             `Price $${currentPrice.toFixed(2)} is ${(priceVsSma * 100).toFixed(2)}% above SMA(${lookback}) $${sma.toFixed(2)}, ` +
-            `volume ${(todayVol / avgVol).toFixed(1)}× avg, trend rising [${horizon}]`,
+            `volume ${volRatio.toFixed(1)}× avg, trend rising [${horizon}]`,
           strategyConfidence: Math.min(1, strength * 8 + 0.3),
           marketData: { currentPrice, sma },
         };
@@ -182,8 +205,14 @@ export async function momentumRider(
           };
         }
       }
+    } else {
+      // heldQty === 0 and price below SMA entry range
+      diagLines.push(`${symbol}: $${currentPrice.toFixed(2)} too far below SMA ${sma.toFixed(2)} (${(priceVsSma * 100).toFixed(2)}% vs -${(smaBuffer * 100).toFixed(1)}% floor)`);
     }
   }
+
+  _lastStrategyDiagnostics = diagLines.slice(0, 10).join(" | ");
+  console.log(`[momentumRider] ${_lastStrategyDiagnostics}`);
 
   return bestSignal;
 }
