@@ -3,7 +3,6 @@ export type RiskLevel = "low" | "medium" | "high";
 export type StrategyId =
   | "momentum_rider"
   | "mean_reversion"
-  | "news_sentiment"
   | "prediction_arb"
   | "dca_plus"
   | "custom"
@@ -86,7 +85,7 @@ export const TIME_HORIZONS: TimeHorizon[] = [
     rsiPeriod: 14,
     smaPeriod: 20,
     positionSizePct: 10,
-    bestFor: ["momentum_rider", "mean_reversion", "news_sentiment", "prediction_arb", "dca_plus"],
+    bestFor: ["momentum_rider", "mean_reversion", "news_trader", "prediction_arb", "dca_plus"],
   },
   {
     id: "slow",
@@ -100,20 +99,20 @@ export const TIME_HORIZONS: TimeHorizon[] = [
     rsiPeriod: 21,
     smaPeriod: 50,
     positionSizePct: 15,
-    bestFor: ["dca_plus", "news_sentiment"],
+    bestFor: ["dca_plus", "news_trader"],
   },
 ];
 
 export const STRATEGIES: Strategy[] = [
   {
     id: "momentum_rider",
-    name: "Momentum Rider",
-    tagline: "Ride the trend until it bends",
+    name: "Trend Rider",
+    tagline: "Catch a wave and ride it to the top",
     description:
-      "Buys when price breaks above its 20-day moving average, sells when it breaks below. Captures strong directional moves.",
+      "Buys when a stock climbs above its 20-day average on strong volume, then sells when it falls back below. Simple trend-following that keeps you on the right side of the market.",
     icon: "🚀",
     risk: "medium",
-    nameSuggestions: ["Alpha Rider", "Trend Hawk", "Bull Runner", "Wave Breaker", "Momentum X"],
+    nameSuggestions: ["Wave Rider", "Trend Hawk", "Bull Runner", "Surge Bot", "Momentum X"],
     params: [
       { key: "lookback", label: "Lookback Period", hint: "Days for moving average", min: 5, max: 50, step: 1, unit: " days", default: 20 },
       { key: "position_size", label: "Position Size", hint: "% of budget per trade", min: 1, max: 20, step: 1, unit: "%", default: 10 },
@@ -122,13 +121,13 @@ export const STRATEGIES: Strategy[] = [
   },
   {
     id: "mean_reversion",
-    name: "Mean Reversion",
-    tagline: "Buy low, sell high — systematically",
+    name: "Bargain Hunter",
+    tagline: "Buy the dip, sell the rip",
     description:
-      "Buys oversold conditions (RSI < 30) and sells overbought (RSI > 70). Profits from price extremes snapping back.",
-    icon: "📈",
+      "Hunts for stocks that have been beaten down too hard and are likely to bounce back. Buys when the RSI shows a stock is oversold, sells when it recovers to overbought territory.",
+    icon: "🛒",
     risk: "medium",
-    nameSuggestions: ["Mean Machine", "Bounce Bot", "Snap Master", "Equilibrium X", "Rubber Band"],
+    nameSuggestions: ["Bounce Bot", "Dip Sniper", "Snap Back", "Rebound AI", "Rubber Band"],
     params: [
       { key: "rsi_oversold", label: "RSI Oversold", hint: "Buy when RSI falls below", min: 20, max: 40, step: 1, unit: "", default: 30 },
       { key: "rsi_overbought", label: "RSI Overbought", hint: "Sell when RSI rises above", min: 60, max: 85, step: 1, unit: "", default: 70 },
@@ -136,67 +135,11 @@ export const STRATEGIES: Strategy[] = [
     ],
   },
   {
-    id: "news_sentiment",
-    name: "News Sentiment",
-    tagline: "Trade the headlines before they move the market",
-    description:
-      "AI reads breaking news and earnings calls in real time, scoring sentiment to enter positions before market reaction.",
-    icon: "📰",
-    risk: "high",
-    nameSuggestions: ["News Ninja", "Headline Bot", "Sentiment 9K", "Media Hawk", "Alpha Reader"],
-    params: [
-      { key: "sentiment_threshold", label: "Sentiment Threshold", hint: "Min confidence to trade (×10)", min: 3, max: 9, step: 1, unit: "×0.1", default: 6 },
-      { key: "max_positions", label: "Max Positions", hint: "Max open positions", min: 1, max: 10, step: 1, unit: "", default: 3 },
-      { key: "position_size", label: "Position Size", hint: "% of budget per trade", min: 1, max: 15, step: 1, unit: "%", default: 8 },
-    ],
-  },
-  {
-    id: "prediction_arb",
-    name: "Prediction Arbitrage",
-    tagline: "Find mispriced outcomes before the market does",
-    description:
-      "Uses ML to identify mispriced probabilities in prediction markets, entering positions when model confidence exceeds threshold.",
-    icon: "🎯",
-    risk: "high",
-    nameSuggestions: ["Edge Finder", "Arb Wizard", "Value Hunter", "Edge Bot", "Alpha Arb"],
-    params: [
-      { key: "confidence_threshold", label: "Confidence Threshold", hint: "Min model confidence (×10)", min: 5, max: 9, step: 1, unit: "×0.1", default: 7 },
-      { key: "max_bet", label: "Max Bet Size", hint: "Max % of budget per trade", min: 1, max: 10, step: 1, unit: "%", default: 5 },
-      { key: "max_positions", label: "Max Positions", hint: "Max concurrent bets", min: 1, max: 10, step: 1, unit: "", default: 5 },
-    ],
-  },
-  {
-    id: "dca_plus",
-    name: "Dollar Cost Average+",
-    tagline: "Smart DCA that doubles down on dips",
-    description:
-      "Buys on a schedule but multiplies position size when the asset dips below threshold, averaging down intelligently.",
-    icon: "🐷",
-    risk: "low",
-    nameSuggestions: ["The Stacker", "Dip Hunter", "Smart DCA", "Buy The Dip", "Accumulator"],
-    params: [
-      { key: "base_amount", label: "Base Amount", hint: "Regular buy amount (USD)", min: 10, max: 500, step: 10, unit: "$", default: 100 },
-      { key: "dip_multiplier", label: "Dip Multiplier", hint: "Multiply on dip (×)", min: 1, max: 4, step: 1, unit: "×", default: 2 },
-      { key: "dip_threshold", label: "Dip Threshold", hint: "Price drop to trigger dip buy", min: 1, max: 15, step: 1, unit: "%", default: 3 },
-    ],
-  },
-  {
-    id: "custom",
-    name: "Custom Strategy",
-    tagline: "Your rules, AI execution",
-    description:
-      "Write your own trading rules in plain English. The AI reads your instructions and current market data on every run to decide whether to trade.",
-    icon: "✏️",
-    risk: "medium",
-    nameSuggestions: ["My Strategy", "Alpha Rules", "Custom Bot", "Rule Engine", "My Playbook"],
-    params: [],
-  },
-  {
     id: "news_trader",
     name: "News Trader",
-    tagline: "Trade the headline, ignore the chart",
+    tagline: "React to breaking news before the crowd does",
     description:
-      "Trades purely on news sentiment — zero technical analysis. Fetches the latest 10 headlines per stock every run and asks the AI: which story is moving markets right now?",
+      "Scans the latest headlines for every stock on the watchlist and lets the AI decide which story is strong enough to trade on. No charts — just news and speed.",
     icon: "🗞️",
     risk: "high",
     nameSuggestions: ["Headline Hawk", "Press Bot", "News Ninja", "Story Seeker", "Media Edge"],
@@ -207,11 +150,41 @@ export const STRATEGIES: Strategy[] = [
     ],
   },
   {
+    id: "prediction_arb",
+    name: "Prediction Pro",
+    tagline: "Spot mispriced stocks before the market corrects",
+    description:
+      "Uses AI to find stocks the market has priced wrong. When the AI's confidence in a move is way higher than what the market implies, it bets on the gap closing.",
+    icon: "🎯",
+    risk: "high",
+    nameSuggestions: ["Edge Finder", "Arb Wizard", "Value Hunter", "Gap Bot", "Alpha Arb"],
+    params: [
+      { key: "confidence_threshold", label: "Confidence Threshold", hint: "Min model confidence (×10)", min: 5, max: 9, step: 1, unit: "×0.1", default: 7 },
+      { key: "max_bet", label: "Max Bet Size", hint: "Max % of budget per trade", min: 1, max: 10, step: 1, unit: "%", default: 5 },
+      { key: "max_positions", label: "Max Positions", hint: "Max concurrent bets", min: 1, max: 10, step: 1, unit: "", default: 5 },
+    ],
+  },
+  {
+    id: "dca_plus",
+    name: "Smart DCA",
+    tagline: "Buy regularly, buy more when prices drop",
+    description:
+      "Invests a fixed amount on a schedule, but automatically buys extra when a stock dips below its average. Think of it as dollar-cost averaging with a turbo boost on red days.",
+    icon: "🐷",
+    risk: "low",
+    nameSuggestions: ["The Stacker", "Dip Hunter", "Steady Bot", "Buy The Dip", "Accumulator"],
+    params: [
+      { key: "base_amount", label: "Base Amount", hint: "Regular buy amount (USD)", min: 10, max: 500, step: 10, unit: "$", default: 100 },
+      { key: "dip_multiplier", label: "Dip Multiplier", hint: "Multiply on dip (×)", min: 1, max: 4, step: 1, unit: "×", default: 2 },
+      { key: "dip_threshold", label: "Dip Threshold", hint: "Price drop to trigger dip buy", min: 1, max: 15, step: 1, unit: "%", default: 3 },
+    ],
+  },
+  {
     id: "blind_quant",
     name: "Blind Quant",
     tagline: "Pure math, zero bias",
     description:
-      "Trades purely on anonymized numbers. The AI sees no tickers, no company names — only RSI, momentum, volume ratios, Bollinger position, and volatility. No brand bias possible.",
+      "The AI never sees company names or tickers — just numbers like RSI, momentum, and volume ratios. No hype, no brand love. Just cold, clean math deciding every trade.",
     icon: "🔢",
     risk: "medium",
     nameSuggestions: ["Math Bot", "Quant Zero", "Pure Alpha", "Signal AI", "Number Cruncher"],
@@ -219,6 +192,17 @@ export const STRATEGIES: Strategy[] = [
       { key: "min_confidence", label: "Min Confidence", hint: "Min AI confidence to trade (×10)", min: 5, max: 9, step: 1, unit: "×0.1", default: 6 },
       { key: "max_positions", label: "Max Positions", hint: "Max open positions", min: 1, max: 5, step: 1, unit: "", default: 3 },
     ],
+  },
+  {
+    id: "custom",
+    name: "Your Rules",
+    tagline: "Write the rules, let AI do the trading",
+    description:
+      "Describe your trading strategy in plain English and the AI will follow it every time it runs. No coding needed — just tell it what to buy, when to sell, and it handles the rest.",
+    icon: "✏️",
+    risk: "medium",
+    nameSuggestions: ["My Strategy", "Alpha Rules", "Custom Bot", "Rule Engine", "My Playbook"],
+    params: [],
   },
 ];
 

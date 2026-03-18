@@ -1,6 +1,5 @@
 import { getDailyBars as _getDailyBars, getLatestPrice, getNews, getNewsBulk } from "./alpaca.ts";
 import {
-  scoreSentiment,
   evalMispricing,
   interpretCustomStrategy,
   newsTraderDecision,
@@ -350,95 +349,7 @@ export async function meanReversion(
 }
 
 // ─────────────────────────────────────────────────────────────
-// 3. NEWS SENTIMENT
-//    Only trade on HIGH URGENCY (≥7) SURPRISE news.
-//    Technical confirmation: buy only when RSI < 60 (not already overbought).
-// ─────────────────────────────────────────────────────────────
-export async function newsSentiment(
-  config: Record<string, any>,
-  agentPositions: Record<string, number>
-): Promise<TradeSignal | null> {
-  const horizon = resolveHorizon(config);
-  const maxAgeHours = horizon === "fast" ? 1 : horizon === "slow" ? 168 : 24;
-  const sentimentThreshold = (config.sentiment_threshold ?? 6) / 10;
-  const positionSizePct = horizon === "fast" ? 5 : horizon === "slow" ? 15 : 10;
-  const cutoffMs = Date.now() - maxAgeHours * 3600 * 1000;
-  const held = heldSymbols(agentPositions);
-
-  let bestSignal: TradeSignal | null = null;
-  let bestScore = 0;
-
-  for (const symbol of WATCHLIST.slice(0, 6)) {
-    const news = await getNews(symbol);
-    if (news.length === 0) continue;
-
-    // Filter to news within the time window
-    const recentNews = news.filter((n: any) => {
-      const ts = n.created_at ?? n.updated_at ?? n.timestamp;
-      if (!ts) return true;
-      return new Date(ts).getTime() >= cutoffMs;
-    });
-    if (recentNews.length === 0) continue;
-
-    const headlines = recentNews.map((n: any) => n.headline);
-    const { score, summary, urgency, surprise } = await scoreSentiment(symbol, headlines);
-
-    // Only act on high-urgency surprise news
-    if (urgency < 7 || !surprise) continue;
-
-    const absScore = Math.abs(score);
-    if (absScore < sentimentThreshold) continue;
-
-    // Fetch bars for RSI technical confirmation
-    const bars = await getDailyBars(symbol, 20);
-    if (bars.length < 14) continue;
-    const closes = bars.map((b) => b.c);
-    const currentPrice = closes[closes.length - 1];
-    if (currentPrice === 0) continue;
-    const rsi = calculateRSI(closes, 14);
-
-    const heldQty = agentPositions[symbol] ?? 0;
-
-    if (score > sentimentThreshold && heldQty === 0) {
-      // Technical confirmation: not already overbought (RSI < 60)
-      if (rsi >= 60) continue;
-      if (isCorrelated(symbol, held)) continue;
-
-      if (absScore > bestScore) {
-        bestScore = absScore;
-        bestSignal = {
-          symbol,
-          side: "buy",
-          notional: positionSizePct,
-          reason:
-            `Positive surprise news (score ${score.toFixed(2)}, urgency ${urgency}/10, RSI ${rsi.toFixed(0)}<60): ` +
-            `${summary} [${horizon}]`,
-          strategyConfidence: Math.min(1, absScore * 0.7 + urgency / 10 * 0.3),
-          marketData: { currentPrice, rsi },
-        };
-      }
-    } else if (score < -sentimentThreshold && heldQty > 0) {
-      if (absScore > bestScore) {
-        bestScore = absScore;
-        bestSignal = {
-          symbol,
-          side: "sell",
-          notional: heldQty * currentPrice,
-          reason:
-            `Negative surprise news (score ${score.toFixed(2)}, urgency ${urgency}/10): ` +
-            `${summary} [${horizon}]`,
-          strategyConfidence: Math.min(1, absScore * 0.7 + urgency / 10 * 0.3),
-          marketData: { currentPrice, rsi },
-        };
-      }
-    }
-  }
-
-  return bestSignal;
-}
-
-// ─────────────────────────────────────────────────────────────
-// 4. PREDICTION ARBITRAGE
+// 3. PREDICTION ARBITRAGE (Prediction Pro)
 //    Kelly Criterion: only trade when AI confidence – market probability > 15%.
 //    Position size scales with Kelly edge.
 // ─────────────────────────────────────────────────────────────
@@ -923,8 +834,6 @@ export async function runStrategy(
       return momentumRider(config, agentPositions);
     case "mean_reversion":
       return meanReversion(config, agentPositions);
-    case "news_sentiment":
-      return newsSentiment(config, agentPositions);
     case "prediction_arb":
       return predictionArb(config, agentPositions);
     case "dca_plus":
