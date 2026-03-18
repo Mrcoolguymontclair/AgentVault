@@ -9,6 +9,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   Alert,
+  useWindowDimensions,
 } from "react-native";
 import { router } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
@@ -167,6 +168,9 @@ export function DeploySheet({ visible, onClose, onDeployed }: Props) {
     }
   }
 
+  const { width: screenWidth, height: screenHeight } = useWindowDimensions();
+  const isWide = Platform.OS === "web" && screenWidth >= 768;
+
   const tierLimit = TIER_LIMITS[plan as keyof typeof TIER_LIMITS] ?? 1;
   const atLimit = agents.filter((a) => a.status !== "stopped").length >= tierLimit;
 
@@ -174,7 +178,7 @@ export function DeploySheet({ visible, onClose, onDeployed }: Props) {
     <Modal
       visible={visible}
       transparent
-      animationType="slide"
+      animationType={isWide ? "fade" : "slide"}
       onRequestClose={resetAndClose}
       statusBarTranslucent
     >
@@ -183,7 +187,12 @@ export function DeploySheet({ visible, onClose, onDeployed }: Props) {
         style={{ flex: 1 }}
       >
         <Pressable
-          style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" }}
+          style={{
+            flex: 1,
+            backgroundColor: "rgba(0,0,0,0.6)",
+            justifyContent: isWide ? "center" : "flex-end",
+            alignItems: isWide ? "center" : "stretch",
+          }}
           onPress={step === 1 ? resetAndClose : undefined}
         >
           <Pressable onPress={(e) => e.stopPropagation()}>
@@ -191,17 +200,22 @@ export function DeploySheet({ visible, onClose, onDeployed }: Props) {
               style={{
                 backgroundColor: colors.card,
                 borderTopLeftRadius: 28,
-                borderTopRightRadius: 28,
+                borderTopRightRadius: isWide ? 28 : 28,
+                borderBottomLeftRadius: isWide ? 28 : 0,
+                borderBottomRightRadius: isWide ? 28 : 0,
                 borderWidth: 1,
-                borderBottomWidth: 0,
+                borderBottomWidth: isWide ? 1 : 0,
                 borderColor: colors.cardBorder,
-                maxHeight: "92%",
+                maxHeight: isWide ? screenHeight * 0.85 : "92%",
+                width: isWide ? Math.min(680, screenWidth * 0.9) : "100%",
               }}
             >
-              {/* Drag Handle */}
-              <View style={{ alignItems: "center", paddingTop: 12, paddingBottom: 4 }}>
-                <View style={{ width: 36, height: 4, borderRadius: 2, backgroundColor: colors.divider }} />
-              </View>
+              {/* Drag Handle — only on mobile bottom sheet */}
+              {!isWide && (
+                <View style={{ alignItems: "center", paddingTop: 12, paddingBottom: 4 }}>
+                  <View style={{ width: 36, height: 4, borderRadius: 2, backgroundColor: colors.divider }} />
+                </View>
+              )}
 
               {/* Header */}
               <View

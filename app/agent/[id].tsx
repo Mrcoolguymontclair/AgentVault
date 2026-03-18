@@ -5,6 +5,7 @@ import {
   ScrollView,
   Pressable,
   Alert,
+  Modal,
   ActivityIndicator,
   Share,
   Platform,
@@ -62,6 +63,7 @@ export default function AgentDetailScreen() {
   const [runResult, setRunResult] = useState<{ title: string; message: string; ok: boolean } | null>(null);
   const [lastSignalAt, setLastSignalAt] = useState<string | null>(null);
   const [lastTradeReasoning, setLastTradeReasoning] = useState<string | null>(null);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   // Fade-in on mount (native driver only — web always visible)
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -165,25 +167,18 @@ export default function AgentDetailScreen() {
 
   const handleDelete = useCallback(() => {
     if (!agent || !isOwnAgent) return;
-    Alert.alert(
-      "Delete Agent",
-      `Are you sure you want to permanently delete "${agent.name}"? This cannot be undone.`,
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Delete",
-          style: "destructive",
-          onPress: async () => {
-            setActionLoading(true);
-            const { error } = await deleteAgent(agent.id);
-            setActionLoading(false);
-            if (error) Alert.alert("Error", "Failed to delete agent.");
-            else router.back();
-          },
-        },
-      ]
-    );
-  }, [agent, isOwnAgent, deleteAgent, router]);
+    setShowDeleteConfirm(true);
+  }, [agent, isOwnAgent]);
+
+  const confirmDelete = useCallback(async () => {
+    if (!agent) return;
+    setShowDeleteConfirm(false);
+    setActionLoading(true);
+    const { error } = await deleteAgent(agent.id);
+    setActionLoading(false);
+    if (error) Alert.alert("Error", "Failed to delete agent.");
+    else router.back();
+  }, [agent, deleteAgent, router]);
 
   // Cross-platform notify: banner in UI (always works) + native Alert on iOS/Android
   const notify = useCallback((title: string, message: string, ok: boolean) => {
@@ -820,6 +815,43 @@ export default function AgentDetailScreen() {
           <CommentSection agentId={agent.id} />
         </View>
       </ScrollView>
+
+      {/* Delete confirmation modal — cross-platform (Alert.alert breaks on web) */}
+      <Modal visible={showDeleteConfirm} transparent animationType="fade" onRequestClose={() => setShowDeleteConfirm(false)}>
+        <Pressable
+          style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.65)", justifyContent: "center", alignItems: "center", padding: 24 }}
+          onPress={() => setShowDeleteConfirm(false)}
+        >
+          <Pressable onPress={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 360 }}>
+            <View style={{ backgroundColor: colors.card, borderRadius: 20, padding: 24, gap: 20, borderWidth: 1, borderColor: colors.cardBorder }}>
+              <View style={{ alignItems: "center", gap: 12 }}>
+                <View style={{ width: 56, height: 56, borderRadius: 18, backgroundColor: Colors.dangerBg, alignItems: "center", justifyContent: "center" }}>
+                  <Ionicons name="trash-outline" size={26} color={Colors.danger} />
+                </View>
+                <Text style={{ color: colors.text, fontSize: 18, fontWeight: "800", textAlign: "center" }}>Delete Agent?</Text>
+                <Text style={{ color: colors.textSecondary, fontSize: 14, lineHeight: 20, textAlign: "center" }}>
+                  <Text style={{ fontWeight: "700", color: colors.text }}>"{agent.name}"</Text>
+                  {" "}will be permanently deleted along with all its trades and logs. This cannot be undone.
+                </Text>
+              </View>
+              <View style={{ flexDirection: "row", gap: 10 }}>
+                <Pressable
+                  onPress={() => setShowDeleteConfirm(false)}
+                  style={{ flex: 1, paddingVertical: 14, borderRadius: 14, backgroundColor: colors.cardSecondary, alignItems: "center", borderWidth: 1, borderColor: colors.cardBorder }}
+                >
+                  <Text style={{ color: colors.text, fontWeight: "700", fontSize: 15 }}>Cancel</Text>
+                </Pressable>
+                <Pressable
+                  onPress={confirmDelete}
+                  style={{ flex: 1, paddingVertical: 14, borderRadius: 14, backgroundColor: Colors.danger, alignItems: "center" }}
+                >
+                  <Text style={{ color: "#fff", fontWeight: "700", fontSize: 15 }}>Delete</Text>
+                </Pressable>
+              </View>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </SafeAreaView>
     </Animated.View>
   );

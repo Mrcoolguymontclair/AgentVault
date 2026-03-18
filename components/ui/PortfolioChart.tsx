@@ -199,7 +199,7 @@ export function PortfolioChart({ data, width, isPositive, isDark, loading }: Pro
 
           {/* Start + end dots */}
           {[pts[0], pts[pts.length - 1]].map((pt, i) => (
-            <React.Fragment key={i}>
+            <React.Fragment key={`dot-${i}`}>
               <Rect
                 x={pt.x - 3}
                 y={pt.y - 3}
@@ -215,7 +215,7 @@ export function PortfolioChart({ data, width, isPositive, isDark, loading }: Pro
         {/* Y-axis labels */}
         {yLabels.map((label, i) => (
           <SvgText
-            key={i}
+            key={`ylabel-${i}`}
             x={PADDING.left + 2}
             y={label.y - 2}
             fontSize={9}
