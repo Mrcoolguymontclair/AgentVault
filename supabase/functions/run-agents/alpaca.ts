@@ -1,22 +1,26 @@
 import type { BarData } from "./types.ts";
 
-// ALPACA_BASE_URL already contains /v2  (e.g. https://paper-api.alpaca.markets/v2)
+// Trading API (orders, account, positions)
 const BASE = (Deno.env.get("ALPACA_BASE_URL") ?? "https://paper-api.alpaca.markets/v2").replace(/\/$/, "");
+// Market data API — always data.alpaca.markets regardless of paper/live
 const DATA = "https://data.alpaca.markets/v2";
-const KEY = Deno.env.get("ALPACA_API_KEY") ?? "";
+const KEY    = Deno.env.get("ALPACA_API_KEY")    ?? "";
 const SECRET = Deno.env.get("ALPACA_API_SECRET") ?? "";
 
+// Log key presence once at module load so we can diagnose missing secrets
+console.log(`[alpaca] KEY set=${KEY.length > 0} SECRET set=${SECRET.length > 0} BASE=${BASE}`);
+
 const HEADERS: Record<string, string> = {
-  "APCA-API-KEY-ID": KEY,
+  "APCA-API-KEY-ID":     KEY,
   "APCA-API-SECRET-KEY": SECRET,
-  "Content-Type": "application/json",
+  "Content-Type":        "application/json",
 };
 
-async function alpacaFetch(url: string, init?: RequestInit) {
+async function alpacaFetch(url: string, init?: RequestInit): Promise<any> {
   const res = await fetch(url, { ...init, headers: { ...HEADERS, ...init?.headers } });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    throw new Error(`Alpaca ${res.status}: ${url} — ${body.slice(0, 200)}`);
+    throw new Error(`Alpaca HTTP ${res.status} ${url} — ${body.slice(0, 300)}`);
   }
   return res.json();
 }
@@ -25,33 +29,62 @@ export async function getAccount() {
   return alpacaFetch(`${BASE}/account`);
 }
 
-/** Fetch up to `limit` daily bars for a symbol.  Returns newest-last. */
+/**
+ * Fetch up to `limit` daily OHLCV bars for a symbol, newest-last.
+ *
+ * Feed priority:
+ *   1. "sip"  — consolidated tape (requires paid data sub; works on live keys)
+ *   2. "iex"  — free real-time feed (15-min delay; no after-hours history)
+ *   3. no feed param — let Alpaca pick the best available for the key tier
+ *
+ * We try sip first; if that returns 0 bars or errors we fall back to iex,
+ * then to no-feed. This handles both free and paid API keys transparently.
+ */
 export async function getDailyBars(symbol: string, limit: number): Promise<BarData[]> {
-  const params = new URLSearchParams({
-    timeframe: "1Day",
-    limit: String(Math.min(limit, 1000)),
-    adjustment: "raw",
-    feed: "iex",
-    sort: "asc",
-  });
-  try {
-    const data = await alpacaFetch(`${DATA}/stocks/${symbol}/bars?${params}`);
-    return (data.bars ?? []) as BarData[];
-  } catch {
-    return [];
+  const safeLimit = Math.min(limit, 1000);
+
+  for (const feed of ["sip", "iex", null] as Array<string | null>) {
+    const params = new URLSearchParams({
+      timeframe: "1Day",
+      limit:      String(safeLimit),
+      adjustment: "raw",
+      sort:       "asc",
+    });
+    if (feed) params.set("feed", feed);
+
+    const url = `${DATA}/stocks/${symbol}/bars?${params}`;
+    try {
+      console.log(`[getDailyBars] ${symbol} feed=${feed ?? "default"} url=${url}`);
+      const data = await alpacaFetch(url);
+      const bars = (data.bars ?? []) as BarData[];
+      console.log(`[getDailyBars] ${symbol} feed=${feed ?? "default"} → ${bars.length} bars`);
+      if (bars.length > 0) return bars;
+      // 0 bars on this feed — try next
+    } catch (err) {
+      console.error(`[getDailyBars] ${symbol} feed=${feed ?? "default"} ERROR:`, (err as Error).message);
+      // try next feed
+    }
   }
+
+  console.error(`[getDailyBars] ${symbol} — all feeds returned 0 bars`);
+  return [];
 }
 
 /** Latest trade price for a symbol */
 export async function getLatestPrice(symbol: string): Promise<number> {
-  try {
-    const data = await alpacaFetch(`${DATA}/stocks/${symbol}/trades/latest?feed=iex`);
-    return Number(data.trade?.p ?? 0);
-  } catch {
-    // fallback to latest bar close
-    const bars = await getDailyBars(symbol, 1);
-    return bars[0]?.c ?? 0;
+  for (const feed of ["sip", "iex", null] as Array<string | null>) {
+    const qs = feed ? `?feed=${feed}` : "";
+    try {
+      const data = await alpacaFetch(`${DATA}/stocks/${symbol}/trades/latest${qs}`);
+      const price = Number(data.trade?.p ?? 0);
+      if (price > 0) return price;
+    } catch {
+      // try next feed
+    }
   }
+  // Last resort: use the most recent daily bar close
+  const bars = await getDailyBars(symbol, 1);
+  return bars[0]?.c ?? 0;
 }
 
 /** Alpaca news for a symbol (last N articles, default 5) */

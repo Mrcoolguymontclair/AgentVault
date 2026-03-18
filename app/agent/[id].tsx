@@ -19,6 +19,8 @@ import { useAuthStore } from "@/store/authStore";
 import { useAgentStore } from "@/store/agentStore";
 import { fetchAgentTrades, fetchPublicAgent, type DbTrade } from "@/lib/services/agentService";
 import { fetchLastSignal, fetchAgentLogs } from "@/lib/services/debugService";
+import { fetchAgentHoldings, getCompanyName, type AgentHolding } from "@/lib/services/holdingsService";
+import { Sparkline } from "@/components/ui/Sparkline";
 import {
   fetchFollowedAgentIds,
   followAgent,
@@ -64,6 +66,8 @@ export default function AgentDetailScreen() {
   const [lastSignalAt, setLastSignalAt] = useState<string | null>(null);
   const [lastTradeReasoning, setLastTradeReasoning] = useState<string | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [agentHoldings, setAgentHoldings] = useState<AgentHolding[]>([]);
+  const [holdingsLoading, setHoldingsLoading] = useState(true);
 
   // Fade-in on mount (native driver only — web always visible)
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -146,6 +150,11 @@ export default function AgentDetailScreen() {
         const followed = await fetchFollowedAgentIds(authUser.id);
         setIsFollowing(followed.has(id));
       }
+
+      // Load agent holdings
+      const holdings = await fetchAgentHoldings(id);
+      setAgentHoldings(holdings);
+      setHoldingsLoading(false);
     }
 
     load();
@@ -787,6 +796,13 @@ export default function AgentDetailScreen() {
           </Card>
         )}
 
+        {/* ── Holdings Section ──────────────────────────────────────── */}
+        <AgentHoldingsSection
+          holdings={agentHoldings}
+          loading={holdingsLoading}
+          colors={colors}
+        />
+
         {/* Trade History */}
         <View style={{ gap: 12 }}>
           <Text style={{ color: colors.text, fontSize: 17, fontWeight: "700" }}>
@@ -854,6 +870,162 @@ export default function AgentDetailScreen() {
       </Modal>
     </SafeAreaView>
     </Animated.View>
+  );
+}
+
+// ─── Agent Holdings Section ───────────────────────────────────────────────────
+function AgentHoldingsSection({
+  holdings,
+  loading,
+  colors,
+}: {
+  holdings: AgentHolding[];
+  loading: boolean;
+  colors: any;
+}) {
+  if (loading) {
+    return (
+      <View style={{ gap: 10 }}>
+        <Text style={{ color: colors.text, fontSize: 17, fontWeight: "700" }}>Holdings</Text>
+        <View
+          style={{
+            backgroundColor: colors.card, borderRadius: 16, borderWidth: 1,
+            borderColor: colors.cardBorder, padding: 14, gap: 12,
+          }}
+        >
+          {[0, 1].map((i) => (
+            <View key={i} style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
+              <View style={{ width: 40, height: 40, borderRadius: 12, backgroundColor: colors.cardSecondary }} />
+              <View style={{ flex: 1, gap: 6 }}>
+                <View style={{ width: 60, height: 12, borderRadius: 5, backgroundColor: colors.cardSecondary }} />
+                <View style={{ width: 100, height: 10, borderRadius: 5, backgroundColor: colors.cardSecondary }} />
+              </View>
+              <View style={{ alignItems: "flex-end", gap: 5 }}>
+                <View style={{ width: 70, height: 12, borderRadius: 5, backgroundColor: colors.cardSecondary }} />
+                <View style={{ width: 80, height: 18, borderRadius: 5, backgroundColor: colors.cardSecondary }} />
+              </View>
+            </View>
+          ))}
+        </View>
+      </View>
+    );
+  }
+
+  if (holdings.length === 0) {
+    return (
+      <View style={{ gap: 10 }}>
+        <Text style={{ color: colors.text, fontSize: 17, fontWeight: "700" }}>Holdings</Text>
+        <View
+          style={{
+            backgroundColor: colors.card, borderRadius: 16, borderWidth: 1,
+            borderColor: colors.cardBorder, padding: 20,
+            alignItems: "center", gap: 8,
+          }}
+        >
+          <Ionicons name="pie-chart-outline" size={28} color={colors.textTertiary} />
+          <Text style={{ color: colors.textSecondary, fontSize: 13, textAlign: "center" }}>
+            No open positions. This agent hasn't made any buys yet.
+          </Text>
+        </View>
+      </View>
+    );
+  }
+
+  const totalValue = holdings.reduce((s, h) => s + h.currentValue, 0);
+  const totalPnl = holdings.reduce((s, h) => s + h.unrealizedPnl, 0);
+  const isPnlPositive = totalPnl >= 0;
+
+  return (
+    <View style={{ gap: 10 }}>
+      {/* Header row */}
+      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+        <Text style={{ color: colors.text, fontSize: 17, fontWeight: "700" }}>Holdings</Text>
+        <View style={{ alignItems: "flex-end" }}>
+          <Text style={{ color: colors.text, fontWeight: "700", fontSize: 14 }}>
+            {new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(totalValue)}
+          </Text>
+          <Text
+            style={{
+              color: isPnlPositive ? Colors.success : Colors.danger,
+              fontSize: 12, fontWeight: "600",
+            }}
+          >
+            {isPnlPositive ? "+" : ""}
+            {new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(totalPnl)} unrealized
+          </Text>
+        </View>
+      </View>
+
+      {/* Holdings card */}
+      <View
+        style={{
+          backgroundColor: colors.card, borderRadius: 18, borderWidth: 1,
+          borderColor: colors.cardBorder, overflow: "hidden",
+        }}
+      >
+        {holdings.map((h, i) => {
+          const isUp = h.unrealizedPnl >= 0;
+          const pnlColor = isUp ? Colors.success : Colors.danger;
+          return (
+            <View key={h.symbol}>
+              <View style={{ flexDirection: "row", alignItems: "center", padding: 14, gap: 12 }}>
+                {/* Ticker badge */}
+                <View
+                  style={{
+                    width: 42, height: 42, borderRadius: 13,
+                    backgroundColor: isUp ? Colors.successBg : Colors.dangerBg,
+                    alignItems: "center", justifyContent: "center",
+                  }}
+                >
+                  <Text style={{ color: pnlColor, fontWeight: "800", fontSize: 11, letterSpacing: -0.3 }}>
+                    {h.symbol.slice(0, 4)}
+                  </Text>
+                </View>
+
+                {/* Name + detail */}
+                <View style={{ flex: 1, gap: 2 }}>
+                  <Text style={{ color: colors.text, fontWeight: "700", fontSize: 14 }}>
+                    {h.symbol}
+                  </Text>
+                  <Text style={{ color: colors.textTertiary, fontSize: 11 }} numberOfLines={1}>
+                    {getCompanyName(h.symbol)}
+                  </Text>
+                  <Text style={{ color: colors.textTertiary, fontSize: 11, marginTop: 1 }}>
+                    {h.quantity.toFixed(4)} @ avg{" "}
+                    {new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(h.avgCost)}
+                  </Text>
+                </View>
+
+                {/* Sparkline */}
+                <Sparkline prices={h.priceHistory} width={52} height={24} color={pnlColor} />
+
+                {/* Value + P&L */}
+                <View style={{ alignItems: "flex-end", gap: 2 }}>
+                  <Text style={{ color: colors.text, fontWeight: "700", fontSize: 14 }}>
+                    {new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(h.currentValue)}
+                  </Text>
+                  <View
+                    style={{
+                      backgroundColor: isUp ? Colors.successBg : Colors.dangerBg,
+                      paddingHorizontal: 7, paddingVertical: 2, borderRadius: 6,
+                    }}
+                  >
+                    <Text style={{ color: pnlColor, fontSize: 11, fontWeight: "700" }}>
+                      {isUp ? "+" : ""}
+                      {new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", notation: "compact" }).format(h.unrealizedPnl)}{" "}
+                      ({isUp ? "+" : ""}{h.unrealizedPnlPct.toFixed(2)}%)
+                    </Text>
+                  </View>
+                </View>
+              </View>
+              {i < holdings.length - 1 && (
+                <View style={{ height: 1, backgroundColor: colors.divider, marginHorizontal: 16 }} />
+              )}
+            </View>
+          );
+        })}
+      </View>
+    </View>
   );
 }
 

@@ -18,6 +18,7 @@ import { useAuthStore } from "@/store/authStore";
 import { useAgentStore, type Agent } from "@/store/agentStore";
 import { AnimatedNumber } from "@/components/ui/AnimatedNumber";
 import { PortfolioChart } from "@/components/ui/PortfolioChart";
+import { Sparkline } from "@/components/ui/Sparkline";
 import { PulsingDot } from "@/components/ui/PulsingDot";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -30,6 +31,13 @@ import {
   type ChartPoint,
   type Timeframe,
 } from "@/lib/services/portfolioService";
+import {
+  fetchPortfolioHoldings,
+  fetchPortfolioStats,
+  getCompanyName,
+  type Holding,
+  type PortfolioStats,
+} from "@/lib/services/holdingsService";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 type TradingMode = "paper" | "live";
@@ -39,6 +47,12 @@ interface DashboardCache {
   totalPnL: number;
   cachedAt: number;
 }
+
+// ─── Allocation palette (distinct colours for pie-bar segments) ──────────────
+const ALLOC_COLORS = [
+  "#22C55E", "#3B82F6", "#F59E0B", "#EF4444", "#8B5CF6",
+  "#EC4899", "#14B8A6", "#F97316", "#84CC16", "#06B6D4",
+];
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 function timeAgo(dateStr: string): string {
@@ -56,6 +70,12 @@ function greeting(): string {
   if (h < 12) return "Good morning";
   if (h < 18) return "Good afternoon";
   return "Good evening";
+}
+
+function formatDate(iso: string): string {
+  return new Date(iso).toLocaleDateString("en-US", {
+    month: "short", day: "numeric", year: "numeric",
+  });
 }
 
 const STATUS_DOT: Record<string, string> = {
@@ -83,10 +103,16 @@ export default function HomeScreen() {
   const [chartWidth, setChartWidth] = useState(0);
   const [marketStatus, setMarketStatus] = useState(getMarketStatus());
 
+  // Holdings + stats state
+  const [holdings, setHoldings] = useState<Holding[]>([]);
+  const [holdingsLoading, setHoldingsLoading] = useState(true);
+  const [stats, setStats] = useState<PortfolioStats | null>(null);
+  const [statsLoading, setStatsLoading] = useState(true);
+
   const displayName = authUser?.user_metadata?.display_name ?? "Trader";
   const avatar = authUser?.user_metadata?.avatar ?? "🚀";
 
-  // Fade-in on mount (disabled on web via useNativeDriver guard)
+  // Fade-in on mount
   const fadeAnim = useRef(new Animated.Value(0)).current;
   useEffect(() => {
     Animated.timing(fadeAnim, {
@@ -118,6 +144,10 @@ export default function HomeScreen() {
 
   const todayPnL = todayTrades.reduce((s, t) => s + t.pnl, 0);
 
+  // Total current holdings value
+  const totalHoldingsValue = holdings.reduce((s, h) => s + h.currentValue, 0);
+  const portfolioValue = 10000 + totalPnL;
+
   // ─── Cache key ────────────────────────────────────────────────────────────
   const cacheKey = `dashboard_v2_${authUser?.id}`;
 
@@ -126,7 +156,6 @@ export default function HomeScreen() {
     async (tf: Timeframe, fromCache = false) => {
       setChartLoading(true);
 
-      // Try cache first (only use cached data if it has 2+ real points)
       if (fromCache) {
         try {
           const raw = await AsyncStorage.getItem(cacheKey);
@@ -143,7 +172,6 @@ export default function HomeScreen() {
         } catch {}
       }
 
-      // Fetch from Supabase
       let data: ChartPoint[] = [];
       if (authUser?.id) {
         data = await fetchPortfolioSnapshots(authUser.id, tf);
@@ -151,14 +179,12 @@ export default function HomeScreen() {
 
       const hasRealData = data.length >= 2;
 
-      // Fall back to a flat line if no real snapshots — never fake wavy data
       if (!hasRealData) {
-        const days =
-          tf === "1W" ? 7 : tf === "1M" ? 30 : tf === "3M" ? 90 : 180;
+        const days = tf === "1W" ? 7 : tf === "1M" ? 30 : tf === "3M" ? 90 : 180;
         const now = new Date();
         const start = new Date(now);
         start.setDate(start.getDate() - days);
-        const baseValue = 10000 + totalPnL;
+        const baseValue = portfolioValue;
         data = [
           { date: start.toISOString().split("T")[0], value: baseValue },
           { date: now.toISOString().split("T")[0], value: baseValue },
@@ -168,7 +194,6 @@ export default function HomeScreen() {
       setChartData(data);
       setChartLoading(false);
 
-      // Only cache real data — don't persist the flat fallback
       if (hasRealData) {
         try {
           const raw = await AsyncStorage.getItem(cacheKey);
@@ -185,12 +210,30 @@ export default function HomeScreen() {
     [authUser?.id, totalPnL, cacheKey]
   );
 
+  // ─── Load holdings + stats ────────────────────────────────────────────────
+  const loadHoldingsAndStats = useCallback(async () => {
+    if (!authUser?.id) return;
+    setHoldingsLoading(true);
+    setStatsLoading(true);
+    const [h, s] = await Promise.all([
+      fetchPortfolioHoldings(authUser.id),
+      fetchPortfolioStats(authUser.id),
+    ]);
+    setHoldings(h);
+    setStats(s);
+    setHoldingsLoading(false);
+    setStatsLoading(false);
+  }, [authUser?.id]);
+
   // ─── Init ─────────────────────────────────────────────────────────────────
   useEffect(() => {
     loadChartData(timeframe, true);
   }, [timeframe]);
 
-  // Regenerate synthetic data when PnL changes (realtime)
+  useEffect(() => {
+    loadHoldingsAndStats();
+  }, [authUser?.id]);
+
   useEffect(() => {
     if (chartData.length > 0) {
       loadChartData(timeframe, false);
@@ -213,10 +256,11 @@ export default function HomeScreen() {
         loadAgents(authUser.id),
         loadTrades(authUser.id),
         loadChartData(timeframe, false),
+        loadHoldingsAndStats(),
       ]);
     }
     setRefreshing(false);
-  }, [authUser?.id, timeframe, loadChartData, loadAgents, loadTrades]);
+  }, [authUser?.id, timeframe, loadChartData, loadAgents, loadTrades, loadHoldingsAndStats]);
 
   // ─── Live trading confirmation ─────────────────────────────────────────
   function handleModeToggle(mode: TradingMode) {
@@ -253,7 +297,7 @@ export default function HomeScreen() {
             tintColor={Colors.accent}
           />
         }
-        contentContainerStyle={{ paddingBottom: 32 }}
+        contentContainerStyle={{ paddingBottom: 40 }}
       >
         {/* ── Header ───────────────────────────────────────────────────── */}
         <View
@@ -283,7 +327,6 @@ export default function HomeScreen() {
           </View>
 
           <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-            {/* Market Status Badge */}
             <View
               style={{
                 flexDirection: "row",
@@ -302,9 +345,7 @@ export default function HomeScreen() {
                 {marketStatus.label}
               </Text>
             </View>
-
             <BellButton />
-
             <Pressable
               style={{
                 width: 38,
@@ -336,11 +377,8 @@ export default function HomeScreen() {
               elevation: 6,
             }}
           >
-            {/* Accent top bar */}
             <View style={{ height: 3, backgroundColor: Colors.accent }} />
-
             <View style={{ padding: 20, paddingBottom: 12, gap: 4 }}>
-              {/* Top row: label + Paper/Live toggle + eye */}
               <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
                 <Text
                   style={{
@@ -353,9 +391,7 @@ export default function HomeScreen() {
                 >
                   Portfolio Value
                 </Text>
-
                 <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                  {/* Paper / Live Toggle */}
                   <View
                     style={{
                       flexDirection: "row",
@@ -377,18 +413,14 @@ export default function HomeScreen() {
                             paddingVertical: 5,
                             borderRadius: 8,
                             backgroundColor: active
-                              ? mode === "live"
-                                ? Colors.danger
-                                : Colors.accentLight + "22"
+                              ? mode === "live" ? Colors.danger : Colors.accentLight + "22"
                               : "transparent",
                           }}
                         >
                           <Text
                             style={{
                               color: active
-                                ? mode === "live"
-                                  ? "#FFF"
-                                  : Colors.accentLight
+                                ? mode === "live" ? "#FFF" : Colors.accentLight
                                 : colors.textTertiary,
                               fontSize: 11,
                               fontWeight: "700",
@@ -401,7 +433,6 @@ export default function HomeScreen() {
                       );
                     })}
                   </View>
-
                   <Pressable onPress={() => setBalanceVisible((v) => !v)}>
                     <Ionicons
                       name={balanceVisible ? "eye-outline" : "eye-off-outline"}
@@ -412,11 +443,10 @@ export default function HomeScreen() {
                 </View>
               </View>
 
-              {/* Balance */}
               <View style={{ gap: 6, marginTop: 8 }}>
                 {balanceVisible ? (
                   <AnimatedNumber
-                    value={10000 + totalPnL}
+                    value={portfolioValue}
                     formatter={(v) => formatCurrency(v)}
                     style={{
                       color: colors.text,
@@ -426,26 +456,17 @@ export default function HomeScreen() {
                     }}
                   />
                 ) : (
-                  <Text
-                    style={{
-                      color: colors.text,
-                      fontSize: 42,
-                      fontWeight: "800",
-                      letterSpacing: -2,
-                    }}
-                  >
+                  <Text style={{ color: colors.text, fontSize: 42, fontWeight: "800", letterSpacing: -2 }}>
                     ••••••
                   </Text>
                 )}
 
-                {/* All-time P&L pill */}
                 <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
                   <View
                     style={{
                       flexDirection: "row",
                       alignItems: "center",
-                      backgroundColor:
-                        totalPnL >= 0 ? Colors.successBg : Colors.dangerBg,
+                      backgroundColor: totalPnL >= 0 ? Colors.successBg : Colors.dangerBg,
                       paddingHorizontal: 10,
                       paddingVertical: 4,
                       borderRadius: 100,
@@ -472,14 +493,7 @@ export default function HomeScreen() {
             </View>
 
             {/* Timeframe selector */}
-            <View
-              style={{
-                flexDirection: "row",
-                paddingHorizontal: 20,
-                gap: 4,
-                marginBottom: 8,
-              }}
-            >
+            <View style={{ flexDirection: "row", paddingHorizontal: 20, gap: 4, marginBottom: 8 }}>
               {TIMEFRAMES.map((tf) => (
                 <Pressable
                   key={tf}
@@ -488,12 +502,10 @@ export default function HomeScreen() {
                     flex: 1,
                     paddingVertical: 6,
                     borderRadius: 8,
-                    backgroundColor:
-                      timeframe === tf ? Colors.accent : "transparent",
+                    backgroundColor: timeframe === tf ? Colors.accent : "transparent",
                     alignItems: "center",
                     borderWidth: 1,
-                    borderColor:
-                      timeframe === tf ? Colors.accent : colors.cardBorder,
+                    borderColor: timeframe === tf ? Colors.accent : colors.cardBorder,
                   }}
                 >
                   <Text
@@ -509,11 +521,7 @@ export default function HomeScreen() {
               ))}
             </View>
 
-            {/* Chart */}
-            <View
-              onLayout={(e) => setChartWidth(e.nativeEvent.layout.width)}
-              style={{ paddingBottom: 8 }}
-            >
+            <View onLayout={(e) => setChartWidth(e.nativeEvent.layout.width)} style={{ paddingBottom: 8 }}>
               {chartWidth > 0 && (
                 <PortfolioChart
                   data={chartData}
@@ -543,21 +551,13 @@ export default function HomeScreen() {
               }
               icon="trending-up-outline"
               iconColor={todayPnL >= 0 ? Colors.success : Colors.danger}
-              iconBg={
-                todayPnL >= 0 ? Colors.successBg : Colors.dangerBg
-              }
+              iconBg={todayPnL >= 0 ? Colors.successBg : Colors.dangerBg}
               colors={colors}
             />
             <QuickStatCard
               label="Trades Today"
               value={
-                <Text
-                  style={{
-                    color: colors.text,
-                    fontSize: 18,
-                    fontWeight: "800",
-                  }}
-                >
+                <Text style={{ color: colors.text, fontSize: 18, fontWeight: "800" }}>
                   {todayTrades.length}
                 </Text>
               }
@@ -586,7 +586,97 @@ export default function HomeScreen() {
             />
           </View>
 
+          {/* ── Holdings Section ─────────────────────────────────────────── */}
+          <SectionHeader
+            title="Holdings"
+            subtitle={
+              holdingsLoading
+                ? "Loading…"
+                : holdings.length > 0
+                ? `${holdings.length} position${holdings.length !== 1 ? "s" : ""} · ${formatCurrency(totalHoldingsValue)}`
+                : undefined
+            }
+            colors={colors}
+          />
+
+          {holdingsLoading ? (
+            <HoldingsSkeleton colors={colors} isDark={isDark} />
+          ) : holdings.length === 0 ? (
+            <View
+              style={{
+                backgroundColor: colors.card,
+                borderRadius: 16,
+                borderWidth: 1,
+                borderColor: colors.cardBorder,
+                borderStyle: "dashed",
+                padding: 28,
+                alignItems: "center",
+                gap: 8,
+              }}
+            >
+              <Ionicons name="pie-chart-outline" size={32} color={colors.textTertiary} />
+              <Text style={{ color: colors.textSecondary, fontSize: 14, textAlign: "center" }}>
+                No open positions yet. Holdings appear here once your agents execute trades.
+              </Text>
+            </View>
+          ) : (
+            <>
+              {/* Holdings list */}
+              <View
+                style={{
+                  backgroundColor: colors.card,
+                  borderRadius: 18,
+                  borderWidth: 1,
+                  borderColor: colors.cardBorder,
+                  overflow: "hidden",
+                }}
+              >
+                {holdings.map((h, i) => (
+                  <View key={h.symbol}>
+                    <HoldingRow holding={h} colors={colors} isDark={isDark} />
+                    {i < holdings.length - 1 && (
+                      <View style={{ height: 1, backgroundColor: colors.divider, marginHorizontal: 16 }} />
+                    )}
+                  </View>
+                ))}
+              </View>
+
+              {/* Allocation bar */}
+              {holdings.length > 1 && totalHoldingsValue > 0 && (
+                <AllocationBar holdings={holdings} totalValue={totalHoldingsValue} colors={colors} />
+              )}
+            </>
+          )}
+
+          {/* ── Performance Stats ─────────────────────────────────────────── */}
+          <SectionHeader title="Performance" colors={colors} />
+
+          {statsLoading ? (
+            <StatsSkeleton colors={colors} />
+          ) : stats && stats.totalTrades > 0 ? (
+            <StatsGrid stats={stats} colors={colors} />
+          ) : (
+            <View
+              style={{
+                backgroundColor: colors.card,
+                borderRadius: 16,
+                borderWidth: 1,
+                borderColor: colors.cardBorder,
+                borderStyle: "dashed",
+                padding: 24,
+                alignItems: "center",
+                gap: 8,
+              }}
+            >
+              <Ionicons name="analytics-outline" size={32} color={colors.textTertiary} />
+              <Text style={{ color: colors.textSecondary, fontSize: 14, textAlign: "center" }}>
+                Stats appear after your first trade.
+              </Text>
+            </View>
+          )}
+
           {/* ── Quick Actions ────────────────────────────────────────────── */}
+          <SectionHeader title="Quick Actions" colors={colors} />
           <View style={{ flexDirection: "row", gap: 10 }}>
             <QuickAction
               icon="add-circle-outline"
@@ -679,31 +769,19 @@ export default function HomeScreen() {
             >
               {recentTrades.slice(0, 8).map((trade, i) => (
                 <View key={trade.id}>
-                  <View
-                    style={{
-                      flexDirection: "row",
-                      alignItems: "center",
-                      gap: 12,
-                      padding: 14,
-                    }}
-                  >
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 12, padding: 14 }}>
                     <View
                       style={{
                         width: 38,
                         height: 38,
                         borderRadius: 11,
-                        backgroundColor:
-                          trade.pnl >= 0 ? Colors.successBg : Colors.dangerBg,
+                        backgroundColor: trade.pnl >= 0 ? Colors.successBg : Colors.dangerBg,
                         alignItems: "center",
                         justifyContent: "center",
                       }}
                     >
                       <Ionicons
-                        name={
-                          trade.side === "buy"
-                            ? "trending-up-outline"
-                            : "trending-down-outline"
-                        }
+                        name={trade.side === "buy" ? "trending-up-outline" : "trending-down-outline"}
                         size={17}
                         color={trade.pnl >= 0 ? Colors.success : Colors.danger}
                       />
@@ -720,14 +798,12 @@ export default function HomeScreen() {
                     <View style={{ alignItems: "flex-end", gap: 3 }}>
                       <Text
                         style={{
-                          color:
-                            trade.pnl >= 0 ? Colors.success : Colors.danger,
+                          color: trade.pnl >= 0 ? Colors.success : Colors.danger,
                           fontWeight: "700",
                           fontSize: 14,
                         }}
                       >
-                        {trade.pnl >= 0 ? "+" : ""}
-                        {formatCurrency(trade.pnl)}
+                        {trade.pnl >= 0 ? "+" : ""}{formatCurrency(trade.pnl)}
                       </Text>
                       <Text style={{ color: colors.textTertiary, fontSize: 11 }}>
                         {timeAgo(trade.executedAt)}
@@ -735,13 +811,7 @@ export default function HomeScreen() {
                     </View>
                   </View>
                   {i < Math.min(recentTrades.length, 8) - 1 && (
-                    <View
-                      style={{
-                        height: 1,
-                        backgroundColor: colors.divider,
-                        marginHorizontal: 14,
-                      }}
-                    />
+                    <View style={{ height: 1, backgroundColor: colors.divider, marginHorizontal: 14 }} />
                   )}
                 </View>
               ))}
@@ -749,24 +819,17 @@ export default function HomeScreen() {
           )}
         </View>
       </ScrollView>
+      </Animated.View>
 
       {/* ── Live Trading Confirmation Modal ─────────────────────────────── */}
-      </Animated.View>
       <Modal
         visible={showLiveModal}
         onClose={() => setShowLiveModal(false)}
         title="Switch to Live Trading?"
         subtitle="This uses real money"
         size="md"
-        primaryAction={{
-          label: "Yes, switch to Live",
-          onPress: confirmLive,
-          destructive: true,
-        }}
-        secondaryAction={{
-          label: "Cancel",
-          onPress: () => setShowLiveModal(false),
-        }}
+        primaryAction={{ label: "Yes, switch to Live", onPress: confirmLive, destructive: true }}
+        secondaryAction={{ label: "Cancel", onPress: () => setShowLiveModal(false) }}
       >
         <View
           style={{
@@ -781,12 +844,9 @@ export default function HomeScreen() {
           <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
             <View
               style={{
-                width: 40,
-                height: 40,
-                borderRadius: 12,
+                width: 40, height: 40, borderRadius: 12,
                 backgroundColor: Colors.danger + "20",
-                alignItems: "center",
-                justifyContent: "center",
+                alignItems: "center", justifyContent: "center",
               }}
             >
               <Ionicons name="warning-outline" size={22} color={Colors.danger} />
@@ -795,29 +855,14 @@ export default function HomeScreen() {
               Live Trading Warning
             </Text>
           </View>
-
           {[
             "Live trading uses real money from your connected account.",
             "You may lose some or all of your invested capital.",
             "AI agents can make mistakes — always monitor your positions.",
           ].map((warning) => (
             <View key={warning} style={{ flexDirection: "row", gap: 8 }}>
-              <Ionicons
-                name="alert-circle-outline"
-                size={14}
-                color={Colors.danger}
-                style={{ marginTop: 2, flexShrink: 0 }}
-              />
-              <Text
-                style={{
-                  color: Colors.danger,
-                  fontSize: 13,
-                  lineHeight: 19,
-                  flex: 1,
-                }}
-              >
-                {warning}
-              </Text>
+              <Ionicons name="alert-circle-outline" size={14} color={Colors.danger} style={{ marginTop: 2, flexShrink: 0 }} />
+              <Text style={{ color: Colors.danger, fontSize: 13, lineHeight: 19, flex: 1 }}>{warning}</Text>
             </View>
           ))}
         </View>
@@ -826,22 +871,366 @@ export default function HomeScreen() {
   );
 }
 
+// ─── HoldingRow ───────────────────────────────────────────────────────────────
+function HoldingRow({ holding, colors, isDark }: { holding: Holding; colors: any; isDark: boolean }) {
+  const isUp = holding.unrealizedPnl >= 0;
+  const pnlColor = isUp ? Colors.success : Colors.danger;
+
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", padding: 14, gap: 12 }}>
+      {/* Ticker icon */}
+      <View
+        style={{
+          width: 42,
+          height: 42,
+          borderRadius: 13,
+          backgroundColor: isUp ? Colors.successBg : Colors.dangerBg,
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        <Text style={{ color: pnlColor, fontWeight: "800", fontSize: 11, letterSpacing: -0.3 }}>
+          {holding.symbol.slice(0, 4)}
+        </Text>
+      </View>
+
+      {/* Name + detail */}
+      <View style={{ flex: 1, gap: 2 }}>
+        <Text style={{ color: colors.text, fontWeight: "700", fontSize: 14 }}>
+          {holding.symbol}
+        </Text>
+        <Text style={{ color: colors.textTertiary, fontSize: 11 }} numberOfLines={1}>
+          {getCompanyName(holding.symbol)}
+        </Text>
+        <Text style={{ color: colors.textTertiary, fontSize: 11, marginTop: 1 }}>
+          {holding.totalQuantity.toFixed(4)} shares · avg {formatCurrency(holding.avgCost)}
+        </Text>
+      </View>
+
+      {/* Sparkline */}
+      <Sparkline
+        prices={holding.priceHistory}
+        width={56}
+        height={26}
+        color={pnlColor}
+      />
+
+      {/* Value + P&L */}
+      <View style={{ alignItems: "flex-end", gap: 2 }}>
+        <Text style={{ color: colors.text, fontWeight: "700", fontSize: 14 }}>
+          {formatCurrency(holding.currentValue)}
+        </Text>
+        <View
+          style={{
+            backgroundColor: isUp ? Colors.successBg : Colors.dangerBg,
+            paddingHorizontal: 7,
+            paddingVertical: 2,
+            borderRadius: 6,
+          }}
+        >
+          <Text style={{ color: pnlColor, fontSize: 11, fontWeight: "700" }}>
+            {isUp ? "+" : ""}{formatCurrency(holding.unrealizedPnl, true)}{" "}
+            ({isUp ? "+" : ""}{holding.unrealizedPnlPct.toFixed(2)}%)
+          </Text>
+        </View>
+      </View>
+    </View>
+  );
+}
+
+// ─── AllocationBar ────────────────────────────────────────────────────────────
+function AllocationBar({ holdings, totalValue, colors }: {
+  holdings: Holding[];
+  totalValue: number;
+  colors: any;
+}) {
+  const top = holdings.slice(0, 8);
+
+  return (
+    <View
+      style={{
+        backgroundColor: colors.card,
+        borderRadius: 16,
+        borderWidth: 1,
+        borderColor: colors.cardBorder,
+        padding: 16,
+        gap: 12,
+      }}
+    >
+      <Text
+        style={{
+          color: colors.textSecondary,
+          fontSize: 11,
+          fontWeight: "700",
+          textTransform: "uppercase",
+          letterSpacing: 0.6,
+        }}
+      >
+        Allocation
+      </Text>
+
+      {/* Segmented bar */}
+      <View style={{ flexDirection: "row", height: 8, borderRadius: 8, overflow: "hidden", gap: 1 }}>
+        {top.map((h, i) => {
+          const pct = (h.currentValue / totalValue) * 100;
+          return (
+            <View
+              key={h.symbol}
+              style={{
+                flex: pct,
+                backgroundColor: ALLOC_COLORS[i % ALLOC_COLORS.length],
+                borderRadius: 2,
+              }}
+            />
+          );
+        })}
+      </View>
+
+      {/* Legend */}
+      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10 }}>
+        {top.map((h, i) => {
+          const pct = (h.currentValue / totalValue) * 100;
+          return (
+            <View key={h.symbol} style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
+              <View
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: 4,
+                  backgroundColor: ALLOC_COLORS[i % ALLOC_COLORS.length],
+                }}
+              />
+              <Text style={{ color: colors.text, fontWeight: "700", fontSize: 12 }}>
+                {h.symbol}
+              </Text>
+              <Text style={{ color: colors.textTertiary, fontSize: 11 }}>
+                {pct.toFixed(1)}%
+              </Text>
+            </View>
+          );
+        })}
+      </View>
+    </View>
+  );
+}
+
+// ─── StatsGrid ────────────────────────────────────────────────────────────────
+function StatsGrid({ stats, colors }: { stats: PortfolioStats; colors: any }) {
+  const sharpeColor =
+    stats.sharpeRatio === null ? colors.textSecondary
+    : stats.sharpeRatio >= 1 ? Colors.success
+    : stats.sharpeRatio >= 0 ? Colors.warning
+    : Colors.danger;
+
+  const sharpeValue =
+    stats.sharpeRatio === null ? "—"
+    : stats.sharpeRatio.toFixed(2);
+
+  const activeSinceStr = stats.activeSince
+    ? new Date(stats.activeSince).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
+    : "—";
+
+  const cards = [
+    {
+      icon: "analytics-outline",
+      label: "Sharpe Ratio",
+      value: sharpeValue,
+      valueColor: sharpeColor,
+      iconColor: sharpeColor,
+      iconBg: sharpeColor + "18",
+      hint: "Risk-adjusted return",
+    },
+    {
+      icon: "trending-down-outline",
+      label: "Max Drawdown",
+      value: stats.maxDrawdownPct > 0 ? `-${stats.maxDrawdownPct.toFixed(1)}%` : "—",
+      valueColor: stats.maxDrawdownPct > 10 ? Colors.danger : stats.maxDrawdownPct > 5 ? Colors.warning : Colors.success,
+      iconColor: Colors.danger,
+      iconBg: Colors.dangerBg,
+      hint: "Biggest peak-to-trough",
+    },
+    {
+      icon: "trophy-outline",
+      label: "Win Rate",
+      value: stats.totalTrades > 0 ? `${stats.winRate.toFixed(1)}%` : "—",
+      valueColor: stats.winRate >= 55 ? Colors.success : stats.winRate >= 45 ? Colors.warning : Colors.danger,
+      iconColor: Colors.gold,
+      iconBg: "rgba(212,175,55,0.15)",
+      hint: "Profitable trades",
+    },
+    {
+      icon: "cash-outline",
+      label: "Avg Trade P&L",
+      value: stats.totalTrades > 0 ? formatCurrency(stats.avgTradePnl, true) : "—",
+      valueColor: stats.avgTradePnl >= 0 ? Colors.success : Colors.danger,
+      iconColor: stats.avgTradePnl >= 0 ? Colors.success : Colors.danger,
+      iconBg: stats.avgTradePnl >= 0 ? Colors.successBg : Colors.dangerBg,
+      hint: "Average per trade",
+    },
+    {
+      icon: "arrow-up-circle-outline",
+      label: "Best Trade",
+      value: stats.bestTradeSymbol !== "—"
+        ? `${stats.bestTradeSymbol} +${formatCurrency(stats.bestTradePnl, true)}`
+        : "—",
+      valueColor: Colors.success,
+      iconColor: Colors.success,
+      iconBg: Colors.successBg,
+      hint: "Single best trade",
+    },
+    {
+      icon: "arrow-down-circle-outline",
+      label: "Worst Trade",
+      value: stats.worstTradeSymbol !== "—"
+        ? `${stats.worstTradeSymbol} ${formatCurrency(stats.worstTradePnl, true)}`
+        : "—",
+      valueColor: Colors.danger,
+      iconColor: Colors.danger,
+      iconBg: Colors.dangerBg,
+      hint: "Biggest single loss",
+    },
+    {
+      icon: "swap-horizontal-outline",
+      label: "Total Trades",
+      value: `${stats.totalTrades}`,
+      valueColor: colors.text,
+      iconColor: Colors.accentLight,
+      iconBg: Colors.accentBg,
+      hint: "All-time executions",
+    },
+    {
+      icon: "calendar-outline",
+      label: "Active Since",
+      value: activeSinceStr,
+      valueColor: colors.text,
+      iconColor: colors.textSecondary,
+      iconBg: colors.cardSecondary,
+      hint: "First trade date",
+    },
+  ];
+
+  return (
+    <View style={{ gap: 10 }}>
+      {[0, 2, 4, 6].map((startIdx) => (
+        <View key={startIdx} style={{ flexDirection: "row", gap: 10 }}>
+          {cards.slice(startIdx, startIdx + 2).map((card) => (
+            <View
+              key={card.label}
+              style={{
+                flex: 1,
+                backgroundColor: colors.card,
+                borderRadius: 16,
+                borderWidth: 1,
+                borderColor: colors.cardBorder,
+                padding: 14,
+                gap: 10,
+              }}
+            >
+              <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+                <View
+                  style={{
+                    width: 34,
+                    height: 34,
+                    borderRadius: 10,
+                    backgroundColor: card.iconBg,
+                    alignItems: "center",
+                    justifyContent: "center",
+                  }}
+                >
+                  <Ionicons name={card.icon as any} size={17} color={card.iconColor} />
+                </View>
+              </View>
+              <Text
+                style={{
+                  color: card.valueColor,
+                  fontSize: card.value.length > 10 ? 13 : 17,
+                  fontWeight: "800",
+                  letterSpacing: -0.3,
+                }}
+                numberOfLines={1}
+                adjustsFontSizeToFit
+              >
+                {card.value}
+              </Text>
+              <View style={{ gap: 1, marginTop: -4 }}>
+                <Text
+                  style={{
+                    color: colors.textTertiary,
+                    fontSize: 10,
+                    fontWeight: "600",
+                    textTransform: "uppercase",
+                    letterSpacing: 0.4,
+                  }}
+                >
+                  {card.label}
+                </Text>
+              </View>
+            </View>
+          ))}
+        </View>
+      ))}
+    </View>
+  );
+}
+
+// ─── Skeleton loaders ─────────────────────────────────────────────────────────
+function HoldingsSkeleton({ colors, isDark }: { colors: any; isDark: boolean }) {
+  const skBg = isDark ? Colors.dark.skeleton : Colors.light.skeleton;
+  return (
+    <View style={{ backgroundColor: colors.card, borderRadius: 18, borderWidth: 1, borderColor: colors.cardBorder, overflow: "hidden" }}>
+      {[0, 1, 2].map((i) => (
+        <View key={i}>
+          <View style={{ flexDirection: "row", alignItems: "center", padding: 14, gap: 12 }}>
+            <View style={{ width: 42, height: 42, borderRadius: 13, backgroundColor: skBg }} />
+            <View style={{ flex: 1, gap: 6 }}>
+              <View style={{ width: 60, height: 13, borderRadius: 6, backgroundColor: skBg }} />
+              <View style={{ width: 110, height: 10, borderRadius: 5, backgroundColor: skBg }} />
+            </View>
+            <View style={{ width: 56, height: 26, borderRadius: 6, backgroundColor: skBg }} />
+            <View style={{ alignItems: "flex-end", gap: 5 }}>
+              <View style={{ width: 70, height: 13, borderRadius: 6, backgroundColor: skBg }} />
+              <View style={{ width: 90, height: 18, borderRadius: 6, backgroundColor: skBg }} />
+            </View>
+          </View>
+          {i < 2 && <View style={{ height: 1, backgroundColor: colors.divider, marginHorizontal: 16 }} />}
+        </View>
+      ))}
+    </View>
+  );
+}
+
+function StatsSkeleton({ colors }: { colors: any }) {
+  return (
+    <View style={{ gap: 10 }}>
+      {[0, 1, 2, 3].map((row) => (
+        <View key={row} style={{ flexDirection: "row", gap: 10 }}>
+          {[0, 1].map((col) => (
+            <View
+              key={col}
+              style={{
+                flex: 1,
+                backgroundColor: colors.card,
+                borderRadius: 16,
+                borderWidth: 1,
+                borderColor: colors.cardBorder,
+                height: 90,
+              }}
+            />
+          ))}
+        </View>
+      ))}
+    </View>
+  );
+}
+
 // ─── Sub-components ──────────────────────────────────────────────────────────
 
 function QuickStatCard({
-  label,
-  value,
-  icon,
-  iconColor,
-  iconBg,
-  colors,
+  label, value, icon, iconColor, iconBg, colors,
 }: {
-  label: string;
-  value: React.ReactNode;
+  label: string; value: React.ReactNode;
   icon: keyof typeof Ionicons.glyphMap;
-  iconColor: string;
-  iconBg: string;
-  colors: any;
+  iconColor: string; iconBg: string; colors: any;
 }) {
   return (
     <View
@@ -857,12 +1246,8 @@ function QuickStatCard({
     >
       <View
         style={{
-          width: 34,
-          height: 34,
-          borderRadius: 10,
-          backgroundColor: iconBg,
-          alignItems: "center",
-          justifyContent: "center",
+          width: 34, height: 34, borderRadius: 10,
+          backgroundColor: iconBg, alignItems: "center", justifyContent: "center",
         }}
       >
         <Ionicons name={icon} size={17} color={iconColor} />
@@ -870,12 +1255,8 @@ function QuickStatCard({
       {value}
       <Text
         style={{
-          color: colors.textTertiary,
-          fontSize: 10,
-          fontWeight: "600",
-          textTransform: "uppercase",
-          letterSpacing: 0.4,
-          marginTop: -4,
+          color: colors.textTertiary, fontSize: 10, fontWeight: "600",
+          textTransform: "uppercase", letterSpacing: 0.4, marginTop: -4,
         }}
       >
         {label}
@@ -885,71 +1266,37 @@ function QuickStatCard({
 }
 
 function QuickAction({
-  icon,
-  label,
-  onPress,
-  accent,
-  accentBg,
-  colors,
+  icon, label, onPress, accent, accentBg, colors,
 }: {
-  icon: keyof typeof Ionicons.glyphMap;
-  label: string;
-  onPress: () => void;
-  accent: string;
-  accentBg: string;
-  colors: any;
+  icon: keyof typeof Ionicons.glyphMap; label: string;
+  onPress: () => void; accent: string; accentBg: string; colors: any;
 }) {
   return (
     <Pressable
       onPress={onPress}
       style={({ pressed }) => ({
-        flex: 1,
-        backgroundColor: colors.card,
-        borderWidth: 1,
-        borderColor: colors.cardBorder,
-        borderRadius: 16,
-        padding: 14,
-        alignItems: "center",
-        gap: 8,
-        opacity: pressed ? 0.7 : 1,
+        flex: 1, backgroundColor: colors.card, borderWidth: 1,
+        borderColor: colors.cardBorder, borderRadius: 16, padding: 14,
+        alignItems: "center", gap: 8, opacity: pressed ? 0.7 : 1,
       })}
     >
       <View
         style={{
-          width: 42,
-          height: 42,
-          borderRadius: 13,
-          backgroundColor: accentBg,
-          alignItems: "center",
-          justifyContent: "center",
+          width: 42, height: 42, borderRadius: 13,
+          backgroundColor: accentBg, alignItems: "center", justifyContent: "center",
         }}
       >
         <Ionicons name={icon} size={20} color={accent} />
       </View>
-      <Text
-        style={{
-          color: colors.text,
-          fontWeight: "700",
-          fontSize: 11,
-          textAlign: "center",
-        }}
-      >
+      <Text style={{ color: colors.text, fontWeight: "700", fontSize: 11, textAlign: "center" }}>
         {label}
       </Text>
     </Pressable>
   );
 }
 
-function AgentCard({
-  agent,
-  colors,
-  isDark,
-  onPress,
-}: {
-  agent: Agent;
-  colors: any;
-  isDark: boolean;
-  onPress: () => void;
+function AgentCard({ agent, colors, isDark, onPress }: {
+  agent: Agent; colors: any; isDark: boolean; onPress: () => void;
 }) {
   const dotColor = STATUS_DOT[agent.status] ?? colors.textTertiary;
   const isActive = agent.status === "active";
@@ -958,125 +1305,65 @@ function AgentCard({
     <Pressable
       onPress={onPress}
       style={({ pressed }) => ({
-        backgroundColor: colors.card,
-        borderRadius: 16,
-        borderWidth: 1,
-        borderColor: colors.cardBorder,
-        padding: 16,
-        opacity: pressed ? 0.8 : 1,
+        backgroundColor: colors.card, borderRadius: 16, borderWidth: 1,
+        borderColor: colors.cardBorder, padding: 16, opacity: pressed ? 0.8 : 1,
       })}
     >
       <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
-        {/* Icon */}
         <View
           style={{
-            width: 46,
-            height: 46,
-            borderRadius: 14,
-            backgroundColor: Colors.accentBg,
-            alignItems: "center",
-            justifyContent: "center",
+            width: 46, height: 46, borderRadius: 14, backgroundColor: Colors.accentBg,
+            alignItems: "center", justifyContent: "center",
           }}
         >
           <Ionicons name="hardware-chip-outline" size={22} color={Colors.accentLight} />
         </View>
-
-        {/* Info */}
         <View style={{ flex: 1, gap: 3 }}>
-          <Text style={{ color: colors.text, fontWeight: "700", fontSize: 15 }}>
-            {agent.name}
-          </Text>
+          <Text style={{ color: colors.text, fontWeight: "700", fontSize: 15 }}>{agent.name}</Text>
           <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-            {isActive ? (
-              <PulsingDot color={dotColor} size={7} />
-            ) : (
-              <View
-                style={{
-                  width: 7,
-                  height: 7,
-                  borderRadius: 3.5,
-                  backgroundColor: dotColor,
-                }}
-              />
-            )}
-            <Text style={{ color: colors.textSecondary, fontSize: 12 }}>
-              {agent.strategy}
-            </Text>
+            {isActive
+              ? <PulsingDot color={dotColor} size={7} />
+              : <View style={{ width: 7, height: 7, borderRadius: 3.5, backgroundColor: dotColor }} />
+            }
+            <Text style={{ color: colors.textSecondary, fontSize: 12 }}>{agent.strategy}</Text>
             <Text style={{ color: colors.textTertiary, fontSize: 12 }}>·</Text>
             <Badge
               label={agent.mode === "live" ? "Live" : "Paper"}
               variant={agent.mode === "live" ? "live" : "paper"}
-              dot
-              size="sm"
+              dot size="sm"
             />
           </View>
         </View>
-
-        {/* P&L */}
         <View style={{ alignItems: "flex-end", gap: 4 }}>
           <AnimatedNumber
             value={agent.pnl}
             formatter={(v) => formatCurrency(v, true)}
-            style={{
-              color: agent.pnl >= 0 ? Colors.success : Colors.danger,
-              fontWeight: "800",
-              fontSize: 16,
-            }}
+            style={{ color: agent.pnl >= 0 ? Colors.success : Colors.danger, fontWeight: "800", fontSize: 16 }}
           />
-          <Text
-            style={{
-              color: agent.pnl >= 0 ? Colors.success : Colors.danger,
-              fontSize: 12,
-              fontWeight: "600",
-            }}
-          >
+          <Text style={{ color: agent.pnl >= 0 ? Colors.success : Colors.danger, fontSize: 12, fontWeight: "600" }}>
             {formatPercent(agent.pnlPct)}
           </Text>
         </View>
       </View>
 
-      {/* Stats row */}
       <View
         style={{
-          flexDirection: "row",
-          justifyContent: "space-between",
-          marginTop: 14,
-          paddingTop: 14,
-          borderTopWidth: 1,
-          borderTopColor: colors.divider,
+          flexDirection: "row", justifyContent: "space-between",
+          marginTop: 14, paddingTop: 14,
+          borderTopWidth: 1, borderTopColor: colors.divider,
         }}
       >
         {[
           { label: "Trades", value: `${agent.trades}` },
-          {
-            label: "Win Rate",
-            value:
-              agent.status === "backtesting" ? "—" : `${agent.winRate.toFixed(1)}%`,
-          },
-          {
-            label: "Max DD",
-            value:
-              agent.status === "backtesting"
-                ? "—"
-                : `${agent.maxDrawdown.toFixed(1)}%`,
-          },
+          { label: "Win Rate", value: agent.status === "backtesting" ? "—" : `${agent.winRate.toFixed(1)}%` },
+          { label: "Max DD", value: agent.status === "backtesting" ? "—" : `${agent.maxDrawdown.toFixed(1)}%` },
           { label: "Sharpe", value: agent.status === "backtesting" ? "—" : `${agent.sharpeRatio.toFixed(1)}` },
         ].map((s) => (
           <View key={s.label} style={{ alignItems: "center", gap: 3 }}>
-            <Text
-              style={{
-                color: colors.textTertiary,
-                fontSize: 10,
-                fontWeight: "600",
-                textTransform: "uppercase",
-                letterSpacing: 0.3,
-              }}
-            >
+            <Text style={{ color: colors.textTertiary, fontSize: 10, fontWeight: "600", textTransform: "uppercase", letterSpacing: 0.3 }}>
               {s.label}
             </Text>
-            <Text style={{ color: colors.text, fontWeight: "700", fontSize: 13 }}>
-              {s.value}
-            </Text>
+            <Text style={{ color: colors.text, fontWeight: "700", fontSize: 13 }}>{s.value}</Text>
           </View>
         ))}
       </View>
@@ -1084,72 +1371,37 @@ function AgentCard({
   );
 }
 
-function EmptyAgentsCard({
-  tradingMode,
-  colors,
-  isDark,
-}: {
-  tradingMode: TradingMode;
-  colors: any;
-  isDark: boolean;
+function EmptyAgentsCard({ tradingMode, colors, isDark }: {
+  tradingMode: TradingMode; colors: any; isDark: boolean;
 }) {
   return (
     <View
       style={{
-        backgroundColor: colors.card,
-        borderRadius: 20,
-        borderWidth: 1,
-        borderColor: colors.cardBorder,
-        borderStyle: "dashed",
-        padding: 32,
-        alignItems: "center",
-        gap: 12,
+        backgroundColor: colors.card, borderRadius: 20, borderWidth: 1,
+        borderColor: colors.cardBorder, borderStyle: "dashed", padding: 32,
+        alignItems: "center", gap: 12,
       }}
     >
-      {/* Illustration */}
       <View
         style={{
-          width: 80,
-          height: 80,
-          borderRadius: 24,
-          backgroundColor: Colors.accentBg,
-          alignItems: "center",
-          justifyContent: "center",
+          width: 80, height: 80, borderRadius: 24, backgroundColor: Colors.accentBg,
+          alignItems: "center", justifyContent: "center",
         }}
       >
         <Ionicons name="hardware-chip-outline" size={40} color={Colors.accentLight} />
       </View>
-
       <View style={{ alignItems: "center", gap: 6 }}>
-        <Text
-          style={{
-            color: colors.text,
-            fontSize: 18,
-            fontWeight: "800",
-            textAlign: "center",
-            letterSpacing: -0.4,
-          }}
-        >
+        <Text style={{ color: colors.text, fontSize: 18, fontWeight: "800", textAlign: "center", letterSpacing: -0.4 }}>
           No {tradingMode === "live" ? "live" : "paper"} agents
         </Text>
-        <Text
-          style={{
-            color: colors.textSecondary,
-            fontSize: 14,
-            textAlign: "center",
-            lineHeight: 20,
-            maxWidth: 260,
-          }}
-        >
+        <Text style={{ color: colors.textSecondary, fontSize: 14, textAlign: "center", lineHeight: 20, maxWidth: 260 }}>
           {tradingMode === "live"
             ? "Switch an agent to live mode or deploy a new one to start trading real money."
             : "Deploy your first AI trading agent in minutes. No coding required."}
         </Text>
       </View>
-
       <Button
-        variant="primary"
-        size="md"
+        variant="primary" size="md"
         icon={<Ionicons name="add" size={16} color="#fff" />}
         onPress={() => router.push("/(tabs)/agents")}
       >
@@ -1160,40 +1412,29 @@ function EmptyAgentsCard({
 }
 
 function SectionHeader({
-  title,
-  actionLabel,
-  onAction,
-  colors,
+  title, subtitle, actionLabel, onAction, colors,
 }: {
-  title: string;
-  actionLabel?: string;
-  onAction?: () => void;
-  colors: any;
+  title: string; subtitle?: string;
+  actionLabel?: string; onAction?: () => void; colors: any;
 }) {
   return (
     <View
       style={{
-        flexDirection: "row",
-        alignItems: "center",
-        justifyContent: "space-between",
-        marginTop: 4,
+        flexDirection: "row", alignItems: "center",
+        justifyContent: "space-between", marginTop: 4,
       }}
     >
-      <Text
-        style={{
-          color: colors.text,
-          fontSize: 17,
-          fontWeight: "800",
-          letterSpacing: -0.3,
-        }}
-      >
-        {title}
-      </Text>
+      <View style={{ gap: 1 }}>
+        <Text style={{ color: colors.text, fontSize: 17, fontWeight: "800", letterSpacing: -0.3 }}>
+          {title}
+        </Text>
+        {subtitle && (
+          <Text style={{ color: colors.textTertiary, fontSize: 12 }}>{subtitle}</Text>
+        )}
+      </View>
       {actionLabel && onAction && (
         <Pressable onPress={onAction}>
-          <Text style={{ color: Colors.accent, fontWeight: "600", fontSize: 13 }}>
-            {actionLabel}
-          </Text>
+          <Text style={{ color: Colors.accent, fontWeight: "600", fontSize: 13 }}>{actionLabel}</Text>
         </Pressable>
       )}
     </View>
