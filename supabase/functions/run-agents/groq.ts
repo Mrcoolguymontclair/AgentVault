@@ -184,6 +184,156 @@ export async function interpretCustomStrategy(opts: {
   }
 }
 
+// ── newsTraderDecision ────────────────────────────────────────
+
+/**
+ * News Trader: one Groq call evaluates all symbols' headlines and picks the
+ * strongest sentiment trade. Returns { execute, symbol, side, reasoning,
+ * confidence, sentiment_score }.
+ */
+export async function newsTraderDecision(opts: {
+  headlinesBySymbol: Record<string, string[]>;
+  heldSymbols: string[];
+  sentimentThreshold: number;
+}): Promise<{
+  execute: boolean;
+  symbol: string;
+  side: "buy" | "sell";
+  reasoning: string;
+  confidence: number;
+  sentiment_score: number;
+}> {
+  const EMPTY = { execute: false, symbol: "", side: "buy" as const, reasoning: "No decision", confidence: 0, sentiment_score: 0 };
+  if (isConservativeMode()) return { ...EMPTY, reasoning: "Conservative mode" };
+
+  // Build compact news block — max 12 symbols, 3 headlines each (60 chars)
+  const newsBlock = Object.entries(opts.headlinesBySymbol)
+    .filter(([, hl]) => hl.length > 0)
+    .slice(0, 12)
+    .map(([sym, hl]) => `${sym}: ${hl.slice(0, 3).map((h) => h.slice(0, 60)).join(" | ")}`)
+    .join("\n");
+
+  const held = opts.heldSymbols.join(",") || "none";
+
+  try {
+    const raw = await groqComplete(
+      [
+        { role: "system", content: "News-only trading AI. No charts, no prices — ONLY news headlines. JSON only." },
+        {
+          role: "user",
+          content:
+            `Headlines:\n${newsBlock}\n\nCurrently holding: ${held}\n` +
+            `Threshold: ${opts.sentimentThreshold.toFixed(1)}. Don't execute buy if already held.\n` +
+            `Which stock has the STRONGEST positive or negative sentiment right now?\n` +
+            `Respond: {"execute":bool,"symbol":"TICKER","side":"buy"or"sell","reasoning":"<30 words citing specific words in headlines","confidence":0-1,"sentiment_score":-1to1}`,
+        },
+      ],
+      120,
+      "sentiment",
+      400
+    );
+    const j = safeJson(raw);
+    const validSymbols = Object.keys(opts.headlinesBySymbol);
+    const symbol = validSymbols.includes(String(j.symbol ?? "")) ? String(j.symbol) : "";
+    const side: "buy" | "sell" = j.side === "sell" ? "sell" : "buy";
+    return {
+      execute:         Boolean(j.execute) && symbol !== "",
+      symbol,
+      side,
+      reasoning:       String(j.reasoning ?? "News sentiment"),
+      confidence:      Math.min(1, Math.max(0, Number(j.confidence) || 0)),
+      sentiment_score: Math.min(1, Math.max(-1, Number(j.sentiment_score) || 0)),
+    };
+  } catch (err: any) {
+    if (err?.message === "CONSERVATIVE_MODE") return { ...EMPTY, reasoning: "Conservative mode" };
+    console.error("newsTraderDecision error:", err);
+    return EMPTY;
+  }
+}
+
+// ── blindQuantDecision ────────────────────────────────────────
+
+/** Anonymized asset packet sent to Groq for Blind Quant strategy. */
+export interface AnonAsset {
+  asset_id: string;           // "Asset_A", "Asset_B", …
+  price_change_1d_pct: number;
+  price_change_5d_pct: number;
+  price_change_20d_pct: number;
+  volume_vs_avg_20d: number;
+  rsi_14: number;
+  distance_from_20d_high_pct: number;
+  distance_from_20d_low_pct: number;
+  volatility_20d: number;
+  sma_20_slope: number;
+  bollinger_position: number; // 0 = lower band, 1 = upper band
+}
+
+/**
+ * Blind Quant: sends fully anonymized numerical packets — no tickers, no names.
+ * Returns { execute, asset_id, side, reasoning, confidence }.
+ */
+export async function blindQuantDecision(opts: {
+  assets: AnonAsset[];
+  heldAssetIds: string[];
+  minConfidence: number;
+}): Promise<{
+  execute: boolean;
+  asset_id: string;
+  side: "buy" | "sell";
+  reasoning: string;
+  confidence: number;
+}> {
+  const EMPTY = { execute: false, asset_id: "", side: "buy" as const, reasoning: "No decision", confidence: 0 };
+  if (isConservativeMode()) return { ...EMPTY, reasoning: "Conservative mode" };
+
+  const assetBlock = opts.assets
+    .map(
+      (a) =>
+        `${a.asset_id}: 1d=${a.price_change_1d_pct.toFixed(2)}% 5d=${a.price_change_5d_pct.toFixed(2)}% ` +
+        `20d=${a.price_change_20d_pct.toFixed(2)}% vol=${a.volume_vs_avg_20d.toFixed(2)}x ` +
+        `RSI=${a.rsi_14.toFixed(0)} hi%=${a.distance_from_20d_high_pct.toFixed(2)} lo%=${a.distance_from_20d_low_pct.toFixed(2)} ` +
+        `bb=${a.bollinger_position.toFixed(2)} slope=${a.sma_20_slope.toFixed(4)} σ=${a.volatility_20d.toFixed(3)}`
+    )
+    .join("\n");
+
+  const held = opts.heldAssetIds.join(",") || "none";
+
+  try {
+    const raw = await groqComplete(
+      [
+        { role: "system", content: "Pure quantitative trading AI. No company names, no tickers, no news — ONLY numbers. JSON only." },
+        {
+          role: "user",
+          content:
+            `Anonymous assets (pure math — no ticker names):\n${assetBlock}\n\n` +
+            `Currently holding: ${held}\n` +
+            `Min confidence to act: ${opts.minConfidence.toFixed(1)}. Don't buy if already held.\n` +
+            `Which asset has the best risk/reward setup based purely on the numbers?\n` +
+            `Respond: {"execute":bool,"asset_id":"Asset_X","side":"buy"or"sell","reasoning":"<30 words citing specific numbers","confidence":0-1}`,
+        },
+      ],
+      120,
+      "custom",
+      450
+    );
+    const j = safeJson(raw);
+    const validIds = opts.assets.map((a) => a.asset_id);
+    const asset_id = validIds.includes(String(j.asset_id ?? "")) ? String(j.asset_id) : "";
+    const side: "buy" | "sell" = j.side === "sell" ? "sell" : "buy";
+    return {
+      execute:    Boolean(j.execute) && asset_id !== "",
+      asset_id,
+      side,
+      reasoning:  String(j.reasoning ?? "Quantitative analysis"),
+      confidence: Math.min(1, Math.max(0, Number(j.confidence) || 0)),
+    };
+  } catch (err: any) {
+    if (err?.message === "CONSERVATIVE_MODE") return { ...EMPTY, reasoning: "Conservative mode" };
+    console.error("blindQuantDecision error:", err);
+    return EMPTY;
+  }
+}
+
 // ── evalMispricing ───────────────────────────────────────────
 
 /** Evaluate prediction-market / mispricing opportunity with Kelly edge. */

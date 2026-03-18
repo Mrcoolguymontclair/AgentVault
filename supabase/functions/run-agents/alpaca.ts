@@ -54,15 +54,45 @@ export async function getLatestPrice(symbol: string): Promise<number> {
   }
 }
 
-/** Alpaca news for a symbol (last 5 articles) */
-export async function getNews(symbol: string): Promise<{ headline: string; summary: string }[]> {
-  const params = new URLSearchParams({ symbols: symbol, limit: "5", sort: "desc" });
+/** Alpaca news for a symbol (last N articles, default 5) */
+export async function getNews(symbol: string, limit = 5): Promise<{ headline: string; summary: string }[]> {
+  const params = new URLSearchParams({ symbols: symbol, limit: String(Math.min(limit, 50)), sort: "desc" });
   try {
     const data = await alpacaFetch(`${DATA}/news?${params}`);
     return (data.news ?? []).map((n: Record<string, string>) => ({
       headline: n.headline ?? "",
       summary: n.summary ?? "",
     }));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Bulk news fetch across multiple symbols in one request.
+ * Returns flat list of { symbol, headline } — each article assigned to its
+ * first matching symbol from the provided list.
+ */
+export async function getNewsBulk(
+  symbols: string[],
+  limit = 50
+): Promise<Array<{ symbol: string; headline: string }>> {
+  const params = new URLSearchParams({
+    symbols: symbols.join(","),
+    limit: String(Math.min(limit, 50)),
+    sort: "desc",
+  });
+  try {
+    const data = await alpacaFetch(`${DATA}/news?${params}`);
+    const results: Array<{ symbol: string; headline: string }> = [];
+    for (const n of (data.news ?? []) as any[]) {
+      const headline = String(n.headline ?? "").trim();
+      if (!headline) continue;
+      const artSymbols: string[] = (n.symbols ?? []).map((s: string) => s.toUpperCase());
+      const matched = artSymbols.find((s) => symbols.includes(s)) ?? artSymbols[0] ?? "";
+      if (matched) results.push({ symbol: matched, headline });
+    }
+    return results;
   } catch {
     return [];
   }

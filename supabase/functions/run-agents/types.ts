@@ -60,7 +60,13 @@ export interface TradeSignal {
     sma?: number;
     rsi?: number;
     dipPct?: number;
+    sentimentScore?: number;
   };
+  /**
+   * When true, the strategy already made the Groq AI decision (e.g. News Trader, Blind Quant).
+   * index.ts will skip the confirmTrade call and use strategyConfidence + reason directly.
+   */
+  skipAiConfirmation?: boolean;
 }
 
 export interface AIDecision {

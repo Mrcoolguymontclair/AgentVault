@@ -1,5 +1,12 @@
-import { getDailyBars as _getDailyBars, getLatestPrice, getNews } from "./alpaca.ts";
-import { scoreSentiment, evalMispricing, interpretCustomStrategy } from "./groq.ts";
+import { getDailyBars as _getDailyBars, getLatestPrice, getNews, getNewsBulk } from "./alpaca.ts";
+import {
+  scoreSentiment,
+  evalMispricing,
+  interpretCustomStrategy,
+  newsTraderDecision,
+  blindQuantDecision,
+  type AnonAsset,
+} from "./groq.ts";
 import {
   calculateSMA,
   calculateRSI,
@@ -724,6 +731,185 @@ export async function customStrategy(
 }
 
 // ─────────────────────────────────────────────────────────────
+// 7. NEWS TRADER
+//    Trades SOLELY on news headlines — zero technical analysis.
+//    One bulk Alpaca news call fetches up to 10 headlines per
+//    watchlist symbol.  One Groq call evaluates all of them and
+//    returns the single strongest sentiment trade.
+//    Hold period: sell when sentiment flips (or config.hold_hours
+//    is respected as a label — time-based exit handled by future
+//    cron runs re-evaluating sentiment).
+// ─────────────────────────────────────────────────────────────
+export async function newsTrader(
+  config: Record<string, any>,
+  agentPositions: Record<string, number>
+): Promise<TradeSignal | null> {
+  const sentimentThreshold = Number(config.sentiment_threshold ?? 6) / 10;
+  const maxPositions = Number(config.max_positions ?? 3);
+  const held = heldSymbols(agentPositions);
+
+  // Fetch news for ALL watchlist symbols in one API call
+  const rawNews = await getNewsBulk(WATCHLIST, 50);
+
+  // Group by symbol
+  const headlinesBySymbol: Record<string, string[]> = {};
+  for (const sym of WATCHLIST) headlinesBySymbol[sym] = [];
+  for (const item of rawNews) {
+    if (headlinesBySymbol[item.symbol] !== undefined) {
+      headlinesBySymbol[item.symbol].push(item.headline);
+    }
+  }
+
+  if (!Object.values(headlinesBySymbol).some((hl) => hl.length > 0)) return null;
+
+  const decision = await newsTraderDecision({ headlinesBySymbol, heldSymbols: held, sentimentThreshold });
+
+  if (!decision.execute || !decision.symbol) return null;
+  if (Math.abs(decision.sentiment_score) < sentimentThreshold) return null;
+
+  const heldQty = agentPositions[decision.symbol] ?? 0;
+  if (decision.side === "buy"  && heldQty > 0)          return null; // already in
+  if (decision.side === "sell" && heldQty === 0)         return null; // nothing to sell
+  if (decision.side === "buy"  && held.length >= maxPositions) return null;
+
+  const bars = await getDailyBars(decision.symbol, 2);
+  if (bars.length === 0) return null;
+  const currentPrice = bars[bars.length - 1].c;
+
+  // Store headlines in reason so they end up in ai_reasoning
+  const headlines = (headlinesBySymbol[decision.symbol] ?? []).slice(0, 5);
+  const headlineText = headlines.map((h) => h.slice(0, 80)).join(" | ");
+  const reason = `[News Trader] score=${decision.sentiment_score.toFixed(2)} — ${decision.reasoning} | Headlines: ${headlineText}`;
+
+  return {
+    symbol:             decision.symbol,
+    side:               decision.side,
+    notional:           decision.side === "buy" ? 15 : heldQty * currentPrice,
+    reason,
+    strategyConfidence: decision.confidence,
+    skipAiConfirmation: true,
+    marketData:         { currentPrice, sentimentScore: decision.sentiment_score },
+  };
+}
+
+// ─────────────────────────────────────────────────────────────
+// 8. BLIND QUANT
+//    Trades SOLELY on anonymized numerical data — the AI never
+//    sees ticker symbols, company names, or sector info.
+//    Anonymizes all 15 watchlist stocks as "Asset_A"–"Asset_O",
+//    sends one Groq call, then maps the winner back to a ticker.
+// ─────────────────────────────────────────────────────────────
+export async function blindQuant(
+  config: Record<string, any>,
+  agentPositions: Record<string, number>
+): Promise<TradeSignal | null> {
+  const minConfidence = Number(config.min_confidence ?? 6) / 10;
+  const maxPositions = Number(config.max_positions ?? 3);
+  const held = heldSymbols(agentPositions);
+
+  const assets: AnonAsset[] = [];
+  const assetIdToSymbol: Record<string, string> = {};
+  let idx = 0;
+
+  for (const symbol of WATCHLIST) {
+    const bars = await getDailyBars(symbol, 30);
+    if (bars.length < 22) continue;
+
+    const closes  = bars.map((b) => b.c);
+    const volumes = bars.map((b) => b.v);
+    const highs   = bars.map((b) => b.h ?? b.c);
+    const lows    = bars.map((b) => b.l ?? b.c);
+
+    const cur   = closes[closes.length - 1];
+    const p1d   = closes[closes.length - 2] || cur;
+    const p5d   = closes[closes.length - 6] || closes[0];
+    const p20d  = closes[closes.length - 21] || closes[0];
+
+    const change1d  = p1d  > 0 ? ((cur - p1d)  / p1d)  * 100 : 0;
+    const change5d  = p5d  > 0 ? ((cur - p5d)  / p5d)  * 100 : 0;
+    const change20d = p20d > 0 ? ((cur - p20d) / p20d) * 100 : 0;
+
+    const avgVol = calculateVolumeMA(volumes.slice(0, -1), 20);
+    const volRatio = avgVol > 0 ? volumes[volumes.length - 1] / avgVol : 1;
+
+    const rsi14 = calculateRSI(closes, 14);
+    const bb = calculateBollingerBands(closes, 20, 2);
+    const bbRange = bb.upper - bb.lower;
+    const bbPos = bbRange > 0 ? Math.min(1, Math.max(0, (cur - bb.lower) / bbRange)) : 0.5;
+
+    const high20 = Math.max(...highs.slice(-20));
+    const low20  = Math.min(...lows.slice(-20));
+    const distHigh = high20 > 0 ? ((cur - high20) / high20) * 100 : 0;
+    const distLow  = low20  > 0 ? ((cur - low20)  / low20)  * 100 : 0;
+
+    // Volatility: std-dev of 20-day daily returns
+    const ret20 = closes.slice(-21);
+    const rets  = ret20.slice(1).map((c, i) => (c - ret20[i]) / ret20[i]);
+    const mu    = rets.reduce((a, b) => a + b, 0) / rets.length;
+    const vol20 = Math.sqrt(rets.reduce((a, r) => a + (r - mu) ** 2, 0) / rets.length);
+
+    const slope = smaSlope(closes, 20, 5);
+
+    const assetId = `Asset_${String.fromCharCode(65 + idx)}`; // A, B, C…
+    assetIdToSymbol[assetId] = symbol;
+    idx++;
+
+    assets.push({
+      asset_id:                  assetId,
+      price_change_1d_pct:       Number(change1d.toFixed(3)),
+      price_change_5d_pct:       Number(change5d.toFixed(3)),
+      price_change_20d_pct:      Number(change20d.toFixed(3)),
+      volume_vs_avg_20d:         Number(volRatio.toFixed(3)),
+      rsi_14:                    Number(rsi14.toFixed(1)),
+      distance_from_20d_high_pct: Number(distHigh.toFixed(3)),
+      distance_from_20d_low_pct:  Number(distLow.toFixed(3)),
+      volatility_20d:            Number(vol20.toFixed(4)),
+      sma_20_slope:              Number(slope.toFixed(5)),
+      bollinger_position:        Number(bbPos.toFixed(3)),
+    });
+  }
+
+  if (assets.length === 0) return null;
+
+  const heldAssetIds = Object.entries(assetIdToSymbol)
+    .filter(([, sym]) => (agentPositions[sym] ?? 0) > 0)
+    .map(([id]) => id);
+
+  const decision = await blindQuantDecision({ assets, heldAssetIds, minConfidence });
+
+  if (!decision.execute || !decision.asset_id) return null;
+  if (decision.confidence < minConfidence) return null;
+
+  const symbol = assetIdToSymbol[decision.asset_id];
+  if (!symbol) return null;
+
+  const heldQty = agentPositions[symbol] ?? 0;
+  if (decision.side === "buy"  && heldQty > 0)               return null;
+  if (decision.side === "sell" && heldQty === 0)              return null;
+  if (decision.side === "buy"  && held.length >= maxPositions) return null;
+
+  const bars = await getDailyBars(symbol, 2);
+  if (bars.length === 0) return null;
+  const currentPrice = bars[bars.length - 1].c;
+
+  // Store the anonymized packet for the chosen asset in the reason
+  const anonAsset = assets.find((a) => a.asset_id === decision.asset_id);
+  const reason =
+    `[Blind Quant] ${decision.asset_id}→${symbol} | ${decision.reasoning} | ` +
+    `data=${JSON.stringify(anonAsset)}`;
+
+  return {
+    symbol,
+    side:               decision.side,
+    notional:           decision.side === "buy" ? 10 : heldQty * currentPrice,
+    reason,
+    strategyConfidence: decision.confidence,
+    skipAiConfirmation: true,
+    marketData:         { currentPrice },
+  };
+}
+
+// ─────────────────────────────────────────────────────────────
 // Router
 // ─────────────────────────────────────────────────────────────
 export async function runStrategy(
@@ -745,6 +931,10 @@ export async function runStrategy(
       return dcaPlus(config, agentPositions, agentAvgCost);
     case "custom":
       return customStrategy(config, agentPositions);
+    case "news_trader":
+      return newsTrader(config, agentPositions);
+    case "blind_quant":
+      return blindQuant(config, agentPositions);
     default:
       console.warn(`Unknown strategy: ${strategyId}`);
       return null;

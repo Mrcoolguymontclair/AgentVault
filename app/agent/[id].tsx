@@ -17,7 +17,7 @@ import { useTheme } from "@/hooks/useTheme";
 import { useAuthStore } from "@/store/authStore";
 import { useAgentStore } from "@/store/agentStore";
 import { fetchAgentTrades, fetchPublicAgent, type DbTrade } from "@/lib/services/agentService";
-import { fetchLastSignal } from "@/lib/services/debugService";
+import { fetchLastSignal, fetchAgentLogs } from "@/lib/services/debugService";
 import {
   fetchFollowedAgentIds,
   followAgent,
@@ -61,6 +61,7 @@ export default function AgentDetailScreen() {
   const [followCount, setFollowCount] = useState(0);
   const [runResult, setRunResult] = useState<{ title: string; message: string; ok: boolean } | null>(null);
   const [lastSignalAt, setLastSignalAt] = useState<string | null>(null);
+  const [lastTradeReasoning, setLastTradeReasoning] = useState<string | null>(null);
 
   // Fade-in on mount (native driver only — web always visible)
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -126,6 +127,17 @@ export default function AgentDetailScreen() {
       // Load last signal timestamp
       const lastSig = await fetchLastSignal(id);
       setLastSignalAt(lastSig);
+
+      // For News Trader and Blind Quant: load the last trade's reasoning
+      const agentStrategy = agents.find((a) => a.id === id)?.strategy;
+      if (agentStrategy === "news_trader" || agentStrategy === "blind_quant") {
+        const userId = agents.find((a) => a.id === id)?.userId ?? authUser?.id ?? "";
+        if (userId) {
+          const logs = await fetchAgentLogs(userId, id, 10);
+          const lastTrade = logs.find((l) => l.action === "traded");
+          if (lastTrade?.ai_reasoning) setLastTradeReasoning(lastTrade.ai_reasoning);
+        }
+      }
 
       // Load follow state
       if (authUser?.id) {
@@ -706,6 +718,50 @@ export default function AgentDetailScreen() {
                   </View>
                   <Text style={{ color: Colors.accentLight, fontSize: 13, lineHeight: 19, opacity: 0.9 }}>
                     {agent.config.strategy_prompt as string}
+                  </Text>
+                </View>
+              </>
+            ) : (agent.strategy === "news_trader" || agent.strategy === "blind_quant") && lastTradeReasoning ? (
+              <>
+                <View style={{ height: 1, backgroundColor: colors.divider, marginVertical: 12 }} />
+                <Text
+                  style={{
+                    color: colors.textTertiary, fontSize: 11, fontWeight: "600",
+                    textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 10,
+                  }}
+                >
+                  {agent.strategy === "news_trader" ? "Last Trade — Headlines" : "Last Trade — Quant Data"}
+                </Text>
+                <View
+                  style={{
+                    backgroundColor: agent.strategy === "news_trader"
+                      ? "rgba(255,169,77,0.08)"
+                      : "rgba(99,102,241,0.08)",
+                    borderRadius: 12,
+                    padding: 12,
+                    borderWidth: 1,
+                    borderColor: agent.strategy === "news_trader"
+                      ? "rgba(255,169,77,0.25)"
+                      : "rgba(99,102,241,0.25)",
+                    gap: 6,
+                  }}
+                >
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                    <Text style={{ fontSize: 13 }}>
+                      {agent.strategy === "news_trader" ? "🗞️" : "🔢"}
+                    </Text>
+                    <Text style={{
+                      color: agent.strategy === "news_trader" ? "#FFA94D" : "#818CF8",
+                      fontSize: 11, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.4,
+                    }}>
+                      {agent.strategy === "news_trader" ? "AI Sentiment Analysis" : "Anonymous Quant Signal"}
+                    </Text>
+                  </View>
+                  <Text style={{
+                    color: agent.strategy === "news_trader" ? "#FFA94D" : "#818CF8",
+                    fontSize: 12, lineHeight: 18, opacity: 0.85,
+                  }}>
+                    {lastTradeReasoning.slice(0, 400)}
                   </Text>
                 </View>
               </>

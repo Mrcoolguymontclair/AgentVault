@@ -223,16 +223,27 @@ async function runAgent(
     }
 
     // ── AI confirmation ───────────────────────────────────────
-    const ai = await confirmTrade({
-      strategy: agent.strategy,
-      symbol: signal.symbol,
-      side: signal.side,
-      reason: signal.reason,
-      ...signal.marketData,
-    });
-
-    // Lower threshold: 0.45 default (0.30 in aggressive mode)
+    // Some strategies (News Trader, Blind Quant) already made the Groq decision
+    // internally — skip confirmTrade and use their result directly.
     const aiThreshold = config.aggressive_mode ? 0.30 : 0.45;
+    let ai: { execute: boolean; reasoning: string; confidence: number };
+
+    if (signal.skipAiConfirmation) {
+      ai = {
+        execute:    signal.strategyConfidence >= aiThreshold,
+        reasoning:  signal.reason,
+        confidence: signal.strategyConfidence,
+      };
+    } else {
+      ai = await confirmTrade({
+        strategy: agent.strategy,
+        symbol:   signal.symbol,
+        side:     signal.side,
+        reason:   signal.reason,
+        ...signal.marketData,
+      });
+    }
+
     if (!ai.execute || ai.confidence < aiThreshold) {
       const skipReason = `AI rejected (confidence ${(ai.confidence * 100).toFixed(0)}%): ${ai.reasoning}`;
       await logExecution(supabase, agent, {

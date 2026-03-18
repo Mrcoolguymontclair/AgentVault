@@ -6,7 +6,9 @@ export type StrategyId =
   | "news_sentiment"
   | "prediction_arb"
   | "dca_plus"
-  | "custom";
+  | "custom"
+  | "news_trader"
+  | "blind_quant";
 
 export type ModelId = "groq_llama" | "claude_haiku" | "claude_sonnet";
 
@@ -188,6 +190,35 @@ export const STRATEGIES: Strategy[] = [
     risk: "medium",
     nameSuggestions: ["My Strategy", "Alpha Rules", "Custom Bot", "Rule Engine", "My Playbook"],
     params: [],
+  },
+  {
+    id: "news_trader",
+    name: "News Trader",
+    tagline: "Trade the headline, ignore the chart",
+    description:
+      "Trades purely on news sentiment — zero technical analysis. Fetches the latest 10 headlines per stock every run and asks the AI: which story is moving markets right now?",
+    icon: "🗞️",
+    risk: "high",
+    nameSuggestions: ["Headline Hawk", "Press Bot", "News Ninja", "Story Seeker", "Media Edge"],
+    params: [
+      { key: "sentiment_threshold", label: "Sentiment Threshold", hint: "Min score to trade (×10)", min: 4, max: 9, step: 1, unit: "×0.1", default: 6 },
+      { key: "max_positions", label: "Max Positions", hint: "Max open positions", min: 1, max: 5, step: 1, unit: "", default: 3 },
+      { key: "hold_hours", label: "Hold Period", hint: "Hours before sentiment re-evaluated", min: 4, max: 72, step: 4, unit: "h", default: 24 },
+    ],
+  },
+  {
+    id: "blind_quant",
+    name: "Blind Quant",
+    tagline: "Pure math, zero bias",
+    description:
+      "Trades purely on anonymized numbers. The AI sees no tickers, no company names — only RSI, momentum, volume ratios, Bollinger position, and volatility. No brand bias possible.",
+    icon: "🔢",
+    risk: "medium",
+    nameSuggestions: ["Math Bot", "Quant Zero", "Pure Alpha", "Signal AI", "Number Cruncher"],
+    params: [
+      { key: "min_confidence", label: "Min Confidence", hint: "Min AI confidence to trade (×10)", min: 5, max: 9, step: 1, unit: "×0.1", default: 6 },
+      { key: "max_positions", label: "Max Positions", hint: "Max open positions", min: 1, max: 5, step: 1, unit: "", default: 3 },
+    ],
   },
 ];
 
