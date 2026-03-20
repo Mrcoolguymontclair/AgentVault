@@ -95,7 +95,6 @@ interface AgentStore {
   agents: Agent[];
   recentTrades: Trade[];
   isLoading: boolean;
-  error: string | null;
   selectedAgent: Agent | null;
 
   loadAgents: (userId: string) => Promise<void>;
@@ -107,7 +106,6 @@ interface AgentStore {
   deleteAgent: (id: string) => Promise<{ error: string | null }>;
   setLoading: (loading: boolean) => void;
   addTrade: (trade: Trade) => void;
-  clearError: () => void;
   startRealtimeSubscriptions: (userId: string) => void;
   stopRealtimeSubscriptions: () => void;
 
@@ -119,7 +117,6 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   agents: [],
   recentTrades: [],
   isLoading: false,
-  error: null,
   selectedAgent: null,
   _tradeChannel: null,
   _agentChannel: null,
@@ -127,7 +124,6 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   setAgents: (agents) => set({ agents }),
   selectAgent: (agent) => set({ selectedAgent: agent }),
   setLoading: (loading) => set({ isLoading: loading }),
-  clearError: () => set({ error: null }),
 
   addTrade: (trade) =>
     set((state) => ({
@@ -135,24 +131,16 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     })),
 
   loadAgents: async (userId) => {
-    set({ isLoading: true, error: null });
+    set({ isLoading: true });
     const { data, error } = await fetchUserAgents(userId);
-    if (error) {
-      set({ isLoading: false, error });
-      return;
-    }
-    if (data) {
+    if (data && !error) {
       set({ agents: data.map(dbAgentToAgent) });
     }
     set({ isLoading: false });
   },
 
   loadRecentTrades: async (userId) => {
-    const { data, error } = await fetchRecentTrades(userId);
-    if (error) {
-      set({ error });
-      return;
-    }
+    const { data } = await fetchRecentTrades(userId);
     if (data) {
       set({ recentTrades: data.map(dbTradeToTrade) });
     }

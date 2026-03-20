@@ -34,8 +34,6 @@ export interface DbTrade {
   price: number;
   pnl: number;
   executed_at: string;
-  order_id?: string | null;
-  order_status?: string | null;
   agents?: { name: string };
 }
 
