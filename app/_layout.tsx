@@ -189,13 +189,20 @@ function AppLoader() {
   const [ready, setReady] = useState(false);
   const { loadTheme, theme } = useThemeStore();
   const { loadUser } = useUserStore();
-  const { initialize: initAuth } = useAuthStore();
+  const { initialize: initAuth, session } = useAuthStore();
 
   useEffect(() => {
     Promise.all([loadTheme(), loadUser(), initAuth()]).then(() =>
       setReady(true)
     );
   }, []);
+
+  // Reload user profile from DB whenever auth session changes
+  useEffect(() => {
+    if (session?.user?.id) {
+      loadUser(session.user.id, session.user.email ?? undefined);
+    }
+  }, [session?.user?.id]);
 
   if (!ready) {
     return (

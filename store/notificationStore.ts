@@ -22,10 +22,12 @@ interface NotificationStore {
   hasPermission: boolean;
   showPermissionModal: boolean;
   isLoading: boolean;
+  error: string | null;
 
   // Setters
   setHasPermission: (val: boolean) => void;
   setShowPermissionModal: (val: boolean) => void;
+  clearError: () => void;
 
   // Data actions
   initialize: (userId: string) => Promise<void>;
@@ -64,9 +66,11 @@ export const useNotificationStore = create<NotificationStore>((set, get) => ({
   hasPermission: false,
   showPermissionModal: false,
   isLoading: false,
+  error: null,
 
   setHasPermission: (val) => set({ hasPermission: val }),
   setShowPermissionModal: (val) => set({ showPermissionModal: val }),
+  clearError: () => set({ error: null }),
 
   initialize: async (userId) => {
     await Promise.all([
@@ -76,11 +80,16 @@ export const useNotificationStore = create<NotificationStore>((set, get) => ({
   },
 
   loadNotifications: async (userId) => {
-    set({ isLoading: true });
-    const notifications = await fetchNotifications(userId, 50);
-    const unreadCount = notifications.filter((n) => !n.read).length;
-    set({ notifications, unreadCount, isLoading: false });
-    setBadgeCount(unreadCount);
+    set({ isLoading: true, error: null });
+    try {
+      const notifications = await fetchNotifications(userId, 50);
+      const unreadCount = notifications.filter((n) => !n.read).length;
+      set({ notifications, unreadCount, isLoading: false });
+      setBadgeCount(unreadCount);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to load notifications";
+      set({ isLoading: false, error: message });
+    }
   },
 
   loadPreferences: async (userId) => {
@@ -190,5 +199,6 @@ export const useNotificationStore = create<NotificationStore>((set, get) => ({
       unreadCount: 0,
       preferences: DEFAULT_PREFERENCES,
       hasPermission: false,
+      error: null,
     }),
 }));
