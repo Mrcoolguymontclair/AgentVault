@@ -273,10 +273,15 @@ async function runAgent(
 
     // ── Place Alpaca paper order ──────────────────────────────
     let fillPrice = currentPrice;
+    let alpacaOrderId: string | null = null;
+    let orderStatus = "simulated";
     try {
       const order = await placeOrder(signal.symbol, qty, signal.side);
       // filled_avg_price may be null until filled; fall back to current price
       fillPrice = Number(order.filled_avg_price ?? currentPrice);
+      alpacaOrderId = order.id ?? null;
+      orderStatus = order.status ?? "filled";
+      console.log(`[order] ${signal.symbol} ${signal.side} orderId=${alpacaOrderId} status=${orderStatus}`);
     } catch (err) {
       console.error("Alpaca order error:", err);
       // Continue to log a simulated trade even if Alpaca rejects
@@ -300,40 +305,29 @@ async function runAgent(
       price: fillPrice,
       pnl: tradePnl,
       executed_at: new Date().toISOString(),
+      alpaca_order_id: alpacaOrderId,
+      order_status: orderStatus,
     });
 
-    // ── Update agent stats ────────────────────────────────────
-    const newPnl = Number(agent.pnl) + tradePnl;
-    const newPnlPct = budget > 0 ? (newPnl / budget) * 100 : 0;
-    const newTrades = agent.trades_count + 1;
-
-    // Win rate: count profitable sell trades
-    const { data: sellTrades } = await supabase
-      .from("trades")
-      .select("pnl")
-      .eq("agent_id", agent.id)
-      .eq("side", "sell");
-
-    const sells = sellTrades ?? [];
-    const winners = sells.filter((t) => Number(t.pnl) > 0).length;
-    const newWinRate = sells.length > 0 ? (winners / sells.length) * 100 : 0;
-
-    await supabase.from("agents").update({
-      pnl: newPnl,
-      pnl_pct: newPnlPct,
-      trades_count: newTrades,
-      win_rate: newWinRate,
-      updated_at: new Date().toISOString(),
-    }).eq("id", agent.id);
+    // ── Update agent stats via RPC (recalculates from trades table) ──────────
+    await supabase.rpc("rpc_update_agent_stats", { p_agent_id: agent.id });
 
     // ── Portfolio snapshot (upsert today's value) ─────────────
-    const portfolioValue = budget + newPnl;
+    // Recalculate cumulative PnL for this agent for the snapshot
+    const { data: allAgentTrades } = await supabase
+      .from("trades")
+      .select("pnl")
+      .eq("agent_id", agent.id);
+    const cumulativePnl = (allAgentTrades ?? []).reduce((s, t) => s + Number(t.pnl ?? 0), 0);
+    const portfolioValue = budget + cumulativePnl;
+    const snapshotPnlPct = budget > 0 ? (cumulativePnl / budget) * 100 : 0;
+
     await supabase.from("portfolio_snapshots").upsert(
       {
         user_id: agent.user_id,
         agent_id: agent.id,
         value: portfolioValue,
-        pnl_pct: newPnlPct,
+        pnl_pct: snapshotPnlPct,
         snapshot_date: today,
       },
       { onConflict: "user_id,agent_id,snapshot_date" }

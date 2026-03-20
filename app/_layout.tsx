@@ -15,6 +15,7 @@ import { useAgentStore } from "@/store/agentStore";
 import { useNotificationStore } from "@/store/notificationStore";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { OfflineBanner } from "@/components/OfflineBanner";
+import { ToastContainer } from "@/components/ui/Toast";
 import { PermissionModal } from "@/components/notifications/PermissionModal";
 import {
   requestNotificationPermission,
@@ -313,6 +314,7 @@ function AppLoader() {
         />
       </Stack>
       <OfflineBanner />
+      <ToastContainer />
     </>
   );
 }

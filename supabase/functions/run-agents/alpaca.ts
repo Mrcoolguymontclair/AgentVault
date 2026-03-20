@@ -43,10 +43,14 @@ export async function getAccount() {
 export async function getDailyBars(symbol: string, limit: number): Promise<BarData[]> {
   const safeLimit = Math.min(limit, 1000);
 
+  // Calculate start date as 60 days ago in ISO format
+  const start = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10) + "T00:00:00Z";
+
   for (const feed of ["sip", "iex", null] as Array<string | null>) {
     const params = new URLSearchParams({
       timeframe: "1Day",
       limit:      String(safeLimit),
+      start,
       adjustment: "raw",
       sort:       "asc",
     });
