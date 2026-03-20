@@ -273,12 +273,17 @@ async function runAgent(
 
     // ── Place Alpaca paper order ──────────────────────────────
     let fillPrice = currentPrice;
+    let alpacaOrderId: string | null = null;
+    let orderStatus: string = "simulated";
     try {
       const order = await placeOrder(signal.symbol, qty, signal.side);
       // filled_avg_price may be null until filled; fall back to current price
       fillPrice = Number(order.filled_avg_price ?? currentPrice);
+      alpacaOrderId = order.id ?? null;
+      orderStatus = order.status ?? "accepted";
     } catch (err) {
       console.error("Alpaca order error:", err);
+      orderStatus = "rejected";
       // Continue to log a simulated trade even if Alpaca rejects
       // (Alpaca paper API sometimes rejects outside-hours orders)
     }
@@ -300,6 +305,8 @@ async function runAgent(
       price: fillPrice,
       pnl: tradePnl,
       executed_at: new Date().toISOString(),
+      order_id: alpacaOrderId,
+      order_status: orderStatus,
     });
 
     // ── Update agent stats ────────────────────────────────────
