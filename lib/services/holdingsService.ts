@@ -117,9 +117,23 @@ export function applyCurrentPrices(holdings: Holding[], prices: Record<string, n
   return holdings.map((h) => {
     const price = prices[h.symbol];
     if (!price || price <= 0) return h;
-    const currentValue    = price * h.totalQuantity;
-    const unrealizedPnl   = (price - h.avgCost) * h.totalQuantity;
-    const unrealizedPnlPct = h.avgCost > 0 ? ((price - h.avgCost) / h.avgCost) * 100 : 0;
+
+    const isShort = h.totalQuantity < 0;
+    const absQty  = Math.abs(h.totalQuantity);
+
+    // For longs:  currentValue = price * qty  (positive)
+    // For shorts: currentValue = -(price * absQty)  (negative — a liability)
+    const currentValue = isShort ? -(price * absQty) : price * h.totalQuantity;
+
+    // P&L formula works for both signs of qty:
+    // Long:  (price - avgCost) *  qty  → positive when price rises
+    // Short: (price - avgCost) * -qty  → positive when price falls
+    const unrealizedPnl = (price - h.avgCost) * h.totalQuantity;
+
+    // Pct relative to invested capital (always positive denominator)
+    const investedCapital  = absQty * h.avgCost;
+    const unrealizedPnlPct = investedCapital > 0 ? (unrealizedPnl / investedCapital) * 100 : 0;
+
     return { ...h, lastPrice: price, currentValue, unrealizedPnl, unrealizedPnlPct };
   });
 }

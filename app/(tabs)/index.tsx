@@ -256,15 +256,18 @@ export default function HomeScreen() {
       fetchPortfolioStats(authUser.id),
     ]);
 
-    // Fetch live (or last-close) prices for all open positions
-    const openSymbols = h.filter((x) => x.totalQuantity > 0).map((x) => x.symbol);
+    // Fetch live (or last-close) prices for all open positions (including shorts, which have qty < 0)
+    const openSymbols = h.filter((x) => x.totalQuantity !== 0).map((x) => x.symbol);
     const prices = await fetchCurrentPrices(openSymbols);
     const updatedHoldings = applyCurrentPrices(h, prices);
 
     // Portfolio value = starting balance + realized P&L + unrealized P&L
+    // Includes both long and short positions (shorts have negative qty, handled in applyCurrentPrices)
     const realizedPnl   = s?.totalPnl ?? 0;
     const unrealizedPnl = updatedHoldings.reduce((sum, x) => sum + x.unrealizedPnl, 0);
     setLivePortfolioValue(10000 + realizedPnl + unrealizedPnl);
+    // Also update the profile balance in the background for persistence
+    refreshProfile();
 
     setHoldings(updatedHoldings);
     setStats(s);
@@ -553,34 +556,35 @@ export default function HomeScreen() {
                   </Text>
                 )}
 
-                <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                  <View
-                    style={{
-                      flexDirection: "row",
-                      alignItems: "center",
-                      backgroundColor: totalPnL >= 0 ? Colors.successBg : Colors.dangerBg,
-                      paddingHorizontal: 10,
-                      paddingVertical: 4,
-                      borderRadius: 100,
-                      gap: 4,
-                    }}
-                  >
-                    <Ionicons
-                      name={totalPnL >= 0 ? "trending-up" : "trending-down"}
-                      size={13}
-                      color={totalPnL >= 0 ? Colors.success : Colors.danger}
-                    />
-                    <AnimatedNumber
-                      value={totalPnL}
-                      formatter={(v) => `${v >= 0 ? "+" : ""}${formatCurrency(v)} all time`}
-                      style={{
-                        color: totalPnL >= 0 ? Colors.success : Colors.danger,
-                        fontSize: 12,
-                        fontWeight: "700",
-                      }}
-                    />
-                  </View>
-                </View>
+                {(() => {
+                  const allTimePnl = portfolioValue - 10000;
+                  const allTimePct = (allTimePnl / 10000) * 100;
+                  const up = allTimePnl >= 0;
+                  return (
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                      <View
+                        style={{
+                          flexDirection: "row",
+                          alignItems: "center",
+                          backgroundColor: up ? Colors.successBg : Colors.dangerBg,
+                          paddingHorizontal: 10,
+                          paddingVertical: 4,
+                          borderRadius: 100,
+                          gap: 4,
+                        }}
+                      >
+                        <Ionicons
+                          name={up ? "trending-up" : "trending-down"}
+                          size={13}
+                          color={up ? Colors.success : Colors.danger}
+                        />
+                        <Text style={{ color: up ? Colors.success : Colors.danger, fontSize: 12, fontWeight: "700" }}>
+                          {up ? "+" : ""}{formatCurrency(allTimePnl, true)} ({up ? "+" : ""}{allTimePct.toFixed(2)}%) all time
+                        </Text>
+                      </View>
+                    </View>
+                  );
+                })()}
               </View>
             </View>
 
@@ -1024,37 +1028,78 @@ export default function HomeScreen() {
 
 // ─── HoldingRow ───────────────────────────────────────────────────────────────
 function HoldingRow({ holding, colors, isDark }: { holding: Holding; colors: any; isDark: boolean }) {
-  const isUp = holding.unrealizedPnl >= 0;
-  const pnlColor = isUp ? Colors.success : Colors.danger;
+  const isShort  = holding.totalQuantity < 0;
+  const absQty   = Math.abs(holding.totalQuantity);
+  const isProfitable = holding.unrealizedPnl >= 0;
+  const pnlColor = isProfitable ? Colors.success : Colors.danger;
+
+  // For shorts, show the absolute exposure (what you'd owe to buy back)
+  const displayValue = isShort
+    ? Math.abs(holding.currentValue)
+    : holding.currentValue;
 
   return (
-    <View style={{ flexDirection: "row", alignItems: "center", padding: 14, gap: 12 }}>
+    <View
+      style={{
+        flexDirection: "row",
+        alignItems: "center",
+        padding: 14,
+        gap: 12,
+        borderLeftWidth: isShort ? 3 : 0,
+        borderLeftColor: isShort ? Colors.danger + "80" : "transparent",
+      }}
+    >
       {/* Ticker icon */}
       <View
         style={{
           width: 42,
           height: 42,
           borderRadius: 13,
-          backgroundColor: isUp ? Colors.successBg : Colors.dangerBg,
+          backgroundColor: isShort ? Colors.dangerBg : (isProfitable ? Colors.successBg : Colors.dangerBg),
           alignItems: "center",
           justifyContent: "center",
         }}
       >
-        <Text style={{ color: pnlColor, fontWeight: "800", fontSize: 11, letterSpacing: -0.3 }}>
+        <Text
+          style={{
+            color: isShort ? Colors.danger : pnlColor,
+            fontWeight: "800",
+            fontSize: 11,
+            letterSpacing: -0.3,
+          }}
+        >
           {holding.symbol.slice(0, 4)}
         </Text>
       </View>
 
       {/* Name + detail */}
       <View style={{ flex: 1, gap: 2 }}>
-        <Text style={{ color: colors.text, fontWeight: "700", fontSize: 14 }}>
-          {holding.symbol}
-        </Text>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+          <Text style={{ color: colors.text, fontWeight: "700", fontSize: 14 }}>
+            {holding.symbol}
+          </Text>
+          {isShort && (
+            <View
+              style={{
+                backgroundColor: Colors.dangerBg,
+                borderRadius: 5,
+                paddingHorizontal: 6,
+                paddingVertical: 1,
+              }}
+            >
+              <Text style={{ color: Colors.danger, fontSize: 10, fontWeight: "800", letterSpacing: 0.3 }}>
+                SHORT
+              </Text>
+            </View>
+          )}
+        </View>
         <Text style={{ color: colors.textTertiary, fontSize: 11 }} numberOfLines={1}>
           {getCompanyName(holding.symbol)}
         </Text>
         <Text style={{ color: colors.textTertiary, fontSize: 11, marginTop: 1 }}>
-          {holding.totalQuantity.toFixed(4)} shares · avg {formatCurrency(holding.avgCost)}
+          {isShort
+            ? `${absQty} shares short · shorted @ ${formatCurrency(holding.avgCost)}`
+            : `${absQty.toFixed(4)} shares · avg ${formatCurrency(holding.avgCost)}`}
         </Text>
       </View>
 
@@ -1068,20 +1113,25 @@ function HoldingRow({ holding, colors, isDark }: { holding: Holding; colors: any
 
       {/* Value + P&L */}
       <View style={{ alignItems: "flex-end", gap: 2 }}>
-        <Text style={{ color: colors.text, fontWeight: "700", fontSize: 14 }}>
-          {formatCurrency(holding.currentValue)}
-        </Text>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 3 }}>
+          {isShort && (
+            <Text style={{ color: colors.textTertiary, fontSize: 11 }}>exposure</Text>
+          )}
+          <Text style={{ color: colors.text, fontWeight: "700", fontSize: 14 }}>
+            {formatCurrency(displayValue)}
+          </Text>
+        </View>
         <View
           style={{
-            backgroundColor: isUp ? Colors.successBg : Colors.dangerBg,
+            backgroundColor: isProfitable ? Colors.successBg : Colors.dangerBg,
             paddingHorizontal: 7,
             paddingVertical: 2,
             borderRadius: 6,
           }}
         >
           <Text style={{ color: pnlColor, fontSize: 11, fontWeight: "700" }}>
-            {isUp ? "+" : ""}{formatCurrency(holding.unrealizedPnl, true)}{" "}
-            ({isUp ? "+" : ""}{holding.unrealizedPnlPct.toFixed(2)}%)
+            {isProfitable ? "+" : ""}{formatCurrency(holding.unrealizedPnl, true)}{" "}
+            ({isProfitable ? "+" : ""}{holding.unrealizedPnlPct.toFixed(2)}%)
           </Text>
         </View>
       </View>
