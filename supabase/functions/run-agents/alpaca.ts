@@ -1,25 +1,50 @@
 import type { BarData } from "./types.ts";
 
-// Trading API (orders, account, positions)
-const BASE = (Deno.env.get("ALPACA_BASE_URL") ?? "https://paper-api.alpaca.markets/v2").replace(/\/$/, "");
-// Market data API — always data.alpaca.markets regardless of paper/live
+// ─── Default (paper) keys from env ───────────────────────────────────────────
+const DEFAULT_BASE = (Deno.env.get("ALPACA_BASE_URL") ?? "https://paper-api.alpaca.markets/v2").replace(/\/$/, "");
 const DATA = "https://data.alpaca.markets/v2";
-// Screener API (most-actives, movers)
 const SCREENER = "https://data.alpaca.markets/v1beta1/screener";
-const KEY    = Deno.env.get("ALPACA_API_KEY")    ?? "";
-const SECRET = Deno.env.get("ALPACA_API_SECRET") ?? "";
+const DEFAULT_KEY    = Deno.env.get("ALPACA_API_KEY")    ?? "";
+const DEFAULT_SECRET = Deno.env.get("ALPACA_API_SECRET") ?? "";
 
-// Log key presence once at module load so we can diagnose missing secrets
-console.log(`[alpaca] KEY set=${KEY.length > 0} SECRET set=${SECRET.length > 0} BASE=${BASE}`);
+console.log(`[alpaca] KEY set=${DEFAULT_KEY.length > 0} SECRET set=${DEFAULT_SECRET.length > 0} BASE=${DEFAULT_BASE}`);
 
-const HEADERS: Record<string, string> = {
-  "APCA-API-KEY-ID":     KEY,
-  "APCA-API-SECRET-KEY": SECRET,
-  "Content-Type":        "application/json",
-};
+// ─── Per-agent key override (set before each agent run) ──────────────────────
+let _overrideKey    = "";
+let _overrideSecret = "";
+let _overrideBase   = "";
+
+/** Configure Alpaca keys for a specific agent run. */
+export function setAlpacaKeys(keyId: string, keySecret: string, isLive: boolean) {
+  _overrideKey = keyId;
+  _overrideSecret = keySecret;
+  _overrideBase = isLive
+    ? "https://api.alpaca.markets/v2"
+    : "https://paper-api.alpaca.markets/v2";
+}
+
+/** Reset to app default paper keys. */
+export function clearAlpacaKeys() {
+  _overrideKey = "";
+  _overrideSecret = "";
+  _overrideBase = "";
+}
+
+function getHeaders(): Record<string, string> {
+  return {
+    "APCA-API-KEY-ID":     _overrideKey || DEFAULT_KEY,
+    "APCA-API-SECRET-KEY": _overrideSecret || DEFAULT_SECRET,
+    "Content-Type":        "application/json",
+  };
+}
+
+function getTradingBase(): string {
+  return _overrideBase || DEFAULT_BASE;
+}
 
 async function alpacaFetch(url: string, init?: RequestInit): Promise<any> {
-  const res = await fetch(url, { ...init, headers: { ...HEADERS, ...init?.headers } });
+  const headers = getHeaders();
+  const res = await fetch(url, { ...init, headers: { ...headers, ...init?.headers } });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw new Error(`Alpaca HTTP ${res.status} ${url} — ${body.slice(0, 300)}`);
@@ -28,7 +53,7 @@ async function alpacaFetch(url: string, init?: RequestInit): Promise<any> {
 }
 
 export async function getAccount() {
-  return alpacaFetch(`${BASE}/account`);
+  return alpacaFetch(`${getTradingBase()}/account`);
 }
 
 /**
@@ -180,7 +205,7 @@ export async function getAllNews(
   const url = `https://data.alpaca.markets/v1beta1/news?limit=${Math.min(limit, 50)}&sort=desc`;
   console.log(`[getAllNews] GET ${url}`);
   try {
-    const res = await fetch(url, { headers: HEADERS });
+    const res = await fetch(url, { headers: getHeaders() });
     console.log(`[getAllNews] status=${res.status}`);
     if (!res.ok) {
       const body = await res.text().catch(() => "");
@@ -217,7 +242,7 @@ export async function placeOrder(
   qty: number,
   side: "buy" | "sell"
 ): Promise<AlpacaOrder> {
-  return alpacaFetch(`${BASE}/orders`, {
+  return alpacaFetch(`${getTradingBase()}/orders`, {
     method: "POST",
     body: JSON.stringify({ symbol, qty: String(qty), side, type: "market", time_in_force: "day" }),
   });
@@ -226,7 +251,7 @@ export async function placeOrder(
 /** Get all current open positions */
 export async function getPositions(): Promise<Record<string, { qty: number; avg_entry_price: number }>> {
   try {
-    const data = await alpacaFetch(`${BASE}/positions`);
+    const data = await alpacaFetch(`${getTradingBase()}/positions`);
     const map: Record<string, { qty: number; avg_entry_price: number }> = {};
     for (const p of data as any[]) {
       map[p.symbol] = {

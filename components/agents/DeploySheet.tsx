@@ -32,7 +32,7 @@ import {
   type TimeHorizonId,
   type Strategy,
 } from "@/constants/strategies";
-import { checkAgentLimit } from "@/lib/services/agentService";
+import { checkAgentLimit, checkAlpacaKeyStatus } from "@/lib/services/agentService";
 import { useNotificationStore } from "@/store/notificationStore";
 import type { AgentMode } from "@/store/agentStore";
 
@@ -114,6 +114,24 @@ export function DeploySheet({ visible, onClose, onDeployed }: Props) {
     setDeployError(null);
 
     try {
+      // Check Alpaca keys for live mode
+      if (mode === "live") {
+        const keyStatus = await checkAlpacaKeyStatus(authUser.id);
+        if (!keyStatus?.has_keys) {
+          setIsDeploying(false);
+          setDeployError(null);
+          Alert.alert(
+            "Connect Alpaca First",
+            "Live trading requires your Alpaca API keys. Connect them in Settings.",
+            [
+              { text: "Cancel", style: "cancel" },
+              { text: "Connect Now", onPress: () => { resetAndClose(); router.push("/alpaca-setup" as any); } },
+            ]
+          );
+          return;
+        }
+      }
+
       const { canCreate, current, limit } = await checkAgentLimit(authUser.id, plan);
       if (!canCreate) {
         setIsDeploying(false);

@@ -180,9 +180,11 @@ export default function HomeScreen() {
 
   // Total current holdings value
   const totalHoldingsValue = holdings.reduce((s, h) => s + h.currentValue, 0);
-  // Live value = 10000 + realizedPnL + unrealizedPnL (computed after fetching current prices)
-  // Falls back to profile balance, then to agent-derived estimate
-  const portfolioValue = livePortfolioValue ?? user?.balance ?? (10000 + totalPnL);
+  // Per-agent budget model: portfolio value = SUM(agent budgets) + SUM(agent P&L)
+  const totalBudget = filteredAgents.reduce((s, a) => s + a.budget, 0);
+  // Live value = totalBudget + realizedPnL + unrealizedPnL (computed after fetching current prices)
+  // Falls back to budget + P&L estimate
+  const portfolioValue = livePortfolioValue ?? (totalBudget + totalPnL);
 
   // ─── Cache key ────────────────────────────────────────────────────────────
   const cacheKey = `dashboard_v2_${authUser?.id}`;
@@ -261,11 +263,12 @@ export default function HomeScreen() {
     const prices = await fetchCurrentPrices(openSymbols);
     const updatedHoldings = applyCurrentPrices(h, prices);
 
-    // Portfolio value = starting balance + realized P&L + unrealized P&L
+    // Portfolio value = SUM(agent budgets) + realized P&L + unrealized P&L
     // Includes both long and short positions (shorts have negative qty, handled in applyCurrentPrices)
+    const agentBudgetTotal = agents.filter((a) => a.mode === tradingMode).reduce((sum, a) => sum + a.budget, 0);
     const realizedPnl   = s?.totalPnl ?? 0;
     const unrealizedPnl = updatedHoldings.reduce((sum, x) => sum + x.unrealizedPnl, 0);
-    setLivePortfolioValue(10000 + realizedPnl + unrealizedPnl);
+    setLivePortfolioValue(agentBudgetTotal + realizedPnl + unrealizedPnl);
     // Also update the profile balance in the background for persistence
     refreshProfile();
 
@@ -273,7 +276,7 @@ export default function HomeScreen() {
     setStats(s);
     setHoldingsLoading(false);
     setStatsLoading(false);
-  }, [authUser?.id]);
+  }, [authUser?.id, agents, tradingMode]);
 
   // ─── SPY bars ─────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -469,6 +472,70 @@ export default function HomeScreen() {
         </View>
 
         <View style={{ paddingHorizontal: 16, gap: 12 }}>
+          {/* ── Mode Tab Bar ─────────────────────────────────────────────── */}
+          <View
+            style={{
+              flexDirection: "row",
+              backgroundColor: colors.card,
+              borderRadius: 14,
+              padding: 3,
+              borderWidth: 1,
+              borderColor: colors.cardBorder,
+            }}
+          >
+            {(["paper", "live"] as TradingMode[]).map((m) => {
+              const active = tradingMode === m;
+              const isLive = m === "live";
+              const modeColor = isLive ? Colors.danger : Colors.accent;
+              return (
+                <Pressable
+                  key={m}
+                  onPress={() => handleModeToggle(m)}
+                  style={{
+                    flex: 1,
+                    flexDirection: "row",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: 6,
+                    paddingVertical: 10,
+                    borderRadius: 11,
+                    backgroundColor: active ? modeColor : "transparent",
+                  }}
+                >
+                  <Ionicons
+                    name={isLive ? "flash" : "flask"}
+                    size={14}
+                    color={active ? "#FFF" : colors.textTertiary}
+                  />
+                  <Text
+                    style={{
+                      color: active ? "#FFF" : colors.textTertiary,
+                      fontSize: 14,
+                      fontWeight: "700",
+                      textTransform: "capitalize",
+                    }}
+                  >
+                    {m}
+                  </Text>
+                  {filteredAgents.length > 0 && active && (
+                    <View
+                      style={{
+                        backgroundColor: "rgba(255,255,255,0.25)",
+                        paddingHorizontal: 6,
+                        paddingVertical: 1,
+                        borderRadius: 8,
+                      }}
+                    >
+                      <Text style={{ color: "#FFF", fontSize: 11, fontWeight: "800" }}>
+                        {filteredAgents.length}
+                      </Text>
+                    </View>
+                  )}
+                </Pressable>
+              );
+            })}
+          </View>
+
           {/* ── Portfolio Card ───────────────────────────────────────────── */}
           <View
             style={{
@@ -477,14 +544,14 @@ export default function HomeScreen() {
               borderWidth: 1,
               borderColor: colors.cardBorder,
               overflow: "hidden",
-              shadowColor: Colors.accent,
+              shadowColor: tradingMode === "live" ? Colors.danger : Colors.accent,
               shadowOffset: { width: 0, height: 6 },
               shadowOpacity: 0.1,
               shadowRadius: 20,
               elevation: 6,
             }}
           >
-            <View style={{ height: 3, backgroundColor: Colors.accent }} />
+            <View style={{ height: 3, backgroundColor: tradingMode === "live" ? Colors.danger : Colors.accent }} />
             <View style={{ padding: 20, paddingBottom: 12, gap: 4 }}>
               <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
                 <Text
@@ -496,58 +563,15 @@ export default function HomeScreen() {
                     letterSpacing: 0.8,
                   }}
                 >
-                  Portfolio Value
+                  {tradingMode === "live" ? "Live" : "Paper"} Portfolio
                 </Text>
-                <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                  <View
-                    style={{
-                      flexDirection: "row",
-                      backgroundColor: colors.cardSecondary,
-                      borderRadius: 10,
-                      padding: 2,
-                      borderWidth: 1,
-                      borderColor: colors.cardBorder,
-                    }}
-                  >
-                    {(["paper", "live"] as TradingMode[]).map((mode) => {
-                      const active = tradingMode === mode;
-                      return (
-                        <Pressable
-                          key={mode}
-                          onPress={() => handleModeToggle(mode)}
-                          style={{
-                            paddingHorizontal: 12,
-                            paddingVertical: 5,
-                            borderRadius: 8,
-                            backgroundColor: active
-                              ? mode === "live" ? Colors.danger : Colors.accentLight + "22"
-                              : "transparent",
-                          }}
-                        >
-                          <Text
-                            style={{
-                              color: active
-                                ? mode === "live" ? "#FFF" : Colors.accentLight
-                                : colors.textTertiary,
-                              fontSize: 11,
-                              fontWeight: "700",
-                              textTransform: "capitalize",
-                            }}
-                          >
-                            {mode}
-                          </Text>
-                        </Pressable>
-                      );
-                    })}
-                  </View>
-                  <Pressable onPress={() => setBalanceVisible((v) => !v)}>
-                    <Ionicons
-                      name={balanceVisible ? "eye-outline" : "eye-off-outline"}
-                      size={16}
-                      color={colors.textTertiary}
-                    />
-                  </Pressable>
-                </View>
+                <Pressable onPress={() => setBalanceVisible((v) => !v)}>
+                  <Ionicons
+                    name={balanceVisible ? "eye-outline" : "eye-off-outline"}
+                    size={16}
+                    color={colors.textTertiary}
+                  />
+                </Pressable>
               </View>
 
               <View style={{ gap: 6, marginTop: 8 }}>
@@ -569,8 +593,8 @@ export default function HomeScreen() {
                 )}
 
                 {(() => {
-                  const allTimePnl = portfolioValue - 10000;
-                  const allTimePct = (allTimePnl / 10000) * 100;
+                  const allTimePnl = totalPnL;
+                  const allTimePct = totalBudget > 0 ? (allTimePnl / totalBudget) * 100 : 0;
                   const up = allTimePnl >= 0;
                   return (
                     <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>

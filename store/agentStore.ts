@@ -5,11 +5,13 @@ import {
   updateAgentStatus,
   createAgent as createAgentService,
   deleteAgent as deleteAgentService,
+  updateAgentSettings as updateAgentSettingsService,
   subscribeToTrades,
   subscribeToAgents,
   type DbAgent,
   type DbTrade,
   type CreateAgentInput,
+  type UpdateAgentSettingsInput,
 } from "@/lib/services/agentService";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 import type { ModelId, StrategyId } from "@/constants/strategies";
@@ -104,6 +106,7 @@ interface AgentStore {
   toggleAgent: (id: string) => Promise<void>;
   createAgent: (userId: string, input: CreateAgentInput) => Promise<{ agent: Agent | null; error: string | null }>;
   deleteAgent: (id: string) => Promise<{ error: string | null }>;
+  updateSettings: (input: UpdateAgentSettingsInput) => Promise<{ error: string | null }>;
   setLoading: (loading: boolean) => void;
   addTrade: (trade: Trade) => void;
   startRealtimeSubscriptions: (userId: string) => void;
@@ -178,6 +181,18 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       console.error("[agentStore] createAgent threw:", e);
       return { agent: null, error: e?.message ?? "Unexpected error creating agent" };
     }
+  },
+
+  updateSettings: async (input) => {
+    const { data, error } = await updateAgentSettingsService(input);
+    if (error) return { error };
+    if (data) {
+      const updated = dbAgentToAgent(data);
+      set((state) => ({
+        agents: state.agents.map((a) => (a.id === updated.id ? updated : a)),
+      }));
+    }
+    return { error: null };
   },
 
   deleteAgent: async (id) => {

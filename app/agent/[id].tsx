@@ -11,6 +11,7 @@ import {
   Switch,
   Platform,
   Animated,
+  TextInput,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
@@ -18,7 +19,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { useTheme } from "@/hooks/useTheme";
 import { useAuthStore } from "@/store/authStore";
 import { useAgentStore } from "@/store/agentStore";
-import { fetchAgentTrades, fetchPublicAgent, updateAgentPrivacy, type DbTrade } from "@/lib/services/agentService";
+import { fetchAgentTrades, fetchPublicAgent, updateAgentPrivacy, cashOutAgent, type DbTrade } from "@/lib/services/agentService";
 import { supabase } from "@/lib/supabase";
 
 interface StrategyGeneration {
@@ -72,7 +73,7 @@ export default function AgentDetailScreen() {
   const router = useRouter();
   const { colors } = useTheme();
   const { user: authUser } = useAuthStore();
-  const { agents, toggleAgent, deleteAgent } = useAgentStore();
+  const { agents, toggleAgent, deleteAgent, updateSettings } = useAgentStore();
 
   const [agent, setAgent] = useState<Agent | null>(null);
   const [publicOwnerName, setPublicOwnerName] = useState<string>("");
@@ -96,6 +97,19 @@ export default function AgentDetailScreen() {
   const [generations, setGenerations] = useState<StrategyGeneration[]>([]);
   const [generationsLoading, setGenerationsLoading] = useState(false);
   const [expandedRules, setExpandedRules] = useState<string | null>(null);
+
+  // Edit settings state
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [editName, setEditName] = useState("");
+  const [editBudget, setEditBudget] = useState(0);
+  const [editAggressive, setEditAggressive] = useState(false);
+  const [editTimeHorizon, setEditTimeHorizon] = useState("medium");
+  const [editSaving, setEditSaving] = useState(false);
+
+  // Cash out state
+  const [showCashOutModal, setShowCashOutModal] = useState(false);
+  const [cashOutLoading, setCashOutLoading] = useState(false);
+  const [cashOutResult, setCashOutResult] = useState<{ positions: any[] } | null>(null);
 
   // Fade-in on mount (native driver only — web always visible)
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -321,6 +335,47 @@ export default function AgentDetailScreen() {
     setPrivacyLoading(false);
   }, [agent, isOwnAgent, authUser]);
 
+  const openEditModal = useCallback(() => {
+    if (!agent) return;
+    setEditName(agent.name);
+    setEditBudget(agent.budget);
+    setEditAggressive(!!agent.config.aggressive_mode);
+    setEditTimeHorizon((agent.config.time_horizon as string) ?? "medium");
+    setShowEditModal(true);
+  }, [agent]);
+
+  const handleSaveSettings = useCallback(async () => {
+    if (!agent) return;
+    setEditSaving(true);
+    const { error } = await updateSettings({
+      agentId: agent.id,
+      name: editName.trim() || undefined,
+      budget: editBudget > agent.budget ? editBudget : undefined,
+      aggressive: editAggressive,
+      timeHorizon: editTimeHorizon,
+    });
+    setEditSaving(false);
+    if (error) {
+      Alert.alert("Error", "Failed to save settings.");
+    } else {
+      setShowEditModal(false);
+    }
+  }, [agent, editName, editBudget, editAggressive, editTimeHorizon, updateSettings]);
+
+  const handleCashOut = useCallback(async () => {
+    if (!agent) return;
+    setCashOutLoading(true);
+    const { data, error } = await cashOutAgent(agent.id);
+    setCashOutLoading(false);
+    if (error) {
+      Alert.alert("Error", error);
+      return;
+    }
+    if (data) {
+      setCashOutResult({ positions: data.positions ?? [] });
+    }
+  }, [agent]);
+
   const handleShare = useCallback(async () => {
     if (!agent) return;
     const strategyDef = STRATEGIES.find((s) => s.id === (agent.strategy as StrategyId));
@@ -437,17 +492,30 @@ export default function AgentDetailScreen() {
           </Pressable>
 
           {isOwnAgent && (
-            <Pressable
-              onPress={handleDelete}
-              hitSlop={12}
-              style={{
-                width: 38, height: 38, borderRadius: 12,
-                backgroundColor: Colors.dangerBg,
-                alignItems: "center", justifyContent: "center",
-              }}
-            >
-              <Ionicons name="trash-outline" size={18} color={Colors.danger} />
-            </Pressable>
+            <>
+              <Pressable
+                onPress={openEditModal}
+                hitSlop={12}
+                style={{
+                  width: 38, height: 38, borderRadius: 12,
+                  backgroundColor: Colors.accentBg,
+                  alignItems: "center", justifyContent: "center",
+                }}
+              >
+                <Ionicons name="settings-outline" size={18} color={Colors.accentLight} />
+              </Pressable>
+              <Pressable
+                onPress={handleDelete}
+                hitSlop={12}
+                style={{
+                  width: 38, height: 38, borderRadius: 12,
+                  backgroundColor: Colors.dangerBg,
+                  alignItems: "center", justifyContent: "center",
+                }}
+              >
+                <Ionicons name="trash-outline" size={18} color={Colors.danger} />
+              </Pressable>
+            </>
           )}
 
           {!isOwnAgent && (
@@ -696,6 +764,29 @@ export default function AgentDetailScreen() {
                 </Text>
               </View>
             </Pressable>
+
+            {/* Cash Out */}
+            {agentHoldings.length > 0 && (
+              <Pressable
+                onPress={() => setShowCashOutModal(true)}
+                style={{
+                  flexDirection: "row",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 8,
+                  paddingVertical: 12,
+                  borderRadius: 14,
+                  borderWidth: 1.5,
+                  borderColor: Colors.warning,
+                  backgroundColor: "rgba(255,169,77,0.08)",
+                }}
+              >
+                <Ionicons name="exit-outline" size={16} color={Colors.warning} />
+                <Text style={{ color: Colors.warning, fontWeight: "700", fontSize: 14 }}>
+                  Cash Out
+                </Text>
+              </Pressable>
+            )}
 
             {/* Privacy Toggle */}
             {(() => {
@@ -986,6 +1077,245 @@ export default function AgentDetailScreen() {
                   <Text style={{ color: "#fff", fontWeight: "700", fontSize: 15 }}>Delete</Text>
                 </Pressable>
               </View>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
+      {/* ── Edit Settings Modal ─────────────────────────────────────── */}
+      <Modal visible={showEditModal} transparent animationType="fade" onRequestClose={() => setShowEditModal(false)}>
+        <Pressable
+          style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.65)", justifyContent: "center", alignItems: "center", padding: 24 }}
+          onPress={() => setShowEditModal(false)}
+        >
+          <Pressable onPress={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 400 }}>
+            <ScrollView style={{ maxHeight: 500 }}>
+            <View style={{ backgroundColor: colors.card, borderRadius: 20, padding: 24, gap: 20, borderWidth: 1, borderColor: colors.cardBorder }}>
+              <View style={{ alignItems: "center", gap: 8 }}>
+                <View style={{ width: 48, height: 48, borderRadius: 14, backgroundColor: Colors.accentBg, alignItems: "center", justifyContent: "center" }}>
+                  <Ionicons name="settings-outline" size={24} color={Colors.accentLight} />
+                </View>
+                <Text style={{ color: colors.text, fontSize: 18, fontWeight: "800" }}>Edit Settings</Text>
+              </View>
+
+              {/* Name */}
+              <View style={{ gap: 6 }}>
+                <Text style={{ color: colors.textSecondary, fontSize: 12, fontWeight: "600" }}>Agent Name</Text>
+                <View style={{
+                  backgroundColor: colors.cardSecondary, borderRadius: 12,
+                  borderWidth: 1, borderColor: colors.cardBorder,
+                  paddingHorizontal: 14, paddingVertical: 10,
+                }}>
+                  <TextInput
+                    value={editName}
+                    onChangeText={setEditName}
+                    style={{ color: colors.text, fontSize: 15, fontWeight: "500" }}
+                    maxLength={32}
+                  />
+                </View>
+              </View>
+
+              {/* Budget (can only increase) */}
+              <View style={{ gap: 6 }}>
+                <Text style={{ color: colors.textSecondary, fontSize: 12, fontWeight: "600" }}>
+                  Budget (current: {formatCurrency(agent?.budget ?? 0)})
+                </Text>
+                <View style={{ flexDirection: "row", gap: 8 }}>
+                  {[agent?.budget ?? 1000, (agent?.budget ?? 1000) + 500, (agent?.budget ?? 1000) + 1000, (agent?.budget ?? 1000) + 2500].map((b) => (
+                    <Pressable
+                      key={b}
+                      onPress={() => setEditBudget(b)}
+                      style={{
+                        flex: 1,
+                        paddingVertical: 8,
+                        borderRadius: 10,
+                        alignItems: "center",
+                        backgroundColor: editBudget === b ? Colors.accentBg : colors.cardSecondary,
+                        borderWidth: 1,
+                        borderColor: editBudget === b ? Colors.accent : colors.cardBorder,
+                      }}
+                    >
+                      <Text style={{
+                        color: editBudget === b ? Colors.accentLight : colors.textSecondary,
+                        fontWeight: "700", fontSize: 12,
+                      }}>
+                        ${b >= 1000 ? `${(b / 1000).toFixed(b % 1000 === 0 ? 0 : 1)}K` : b}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+                <Text style={{ color: colors.textTertiary, fontSize: 11 }}>
+                  Budget can only increase, never decrease
+                </Text>
+              </View>
+
+              {/* Time Horizon */}
+              <View style={{ gap: 6 }}>
+                <Text style={{ color: colors.textSecondary, fontSize: 12, fontWeight: "600" }}>Time Horizon</Text>
+                <View style={{ flexDirection: "row", gap: 6 }}>
+                  {TIME_HORIZONS.map((h) => {
+                    const sel = editTimeHorizon === h.id;
+                    return (
+                      <Pressable
+                        key={h.id}
+                        onPress={() => setEditTimeHorizon(h.id)}
+                        style={{
+                          flex: 1,
+                          paddingVertical: 8,
+                          borderRadius: 10,
+                          alignItems: "center",
+                          backgroundColor: sel ? Colors.accentBg : colors.cardSecondary,
+                          borderWidth: 1,
+                          borderColor: sel ? Colors.accent : colors.cardBorder,
+                        }}
+                      >
+                        <Text style={{ fontSize: 16 }}>{h.icon}</Text>
+                        <Text style={{
+                          color: sel ? Colors.accentLight : colors.textSecondary,
+                          fontWeight: "700", fontSize: 10, marginTop: 2,
+                        }}>
+                          {h.name}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </View>
+
+              {/* Aggressive Mode */}
+              <Pressable
+                onPress={() => setEditAggressive(!editAggressive)}
+                style={{
+                  flexDirection: "row", alignItems: "center", gap: 12,
+                  padding: 12, borderRadius: 12,
+                  backgroundColor: editAggressive ? "rgba(255,169,77,0.1)" : colors.cardSecondary,
+                  borderWidth: 1,
+                  borderColor: editAggressive ? Colors.warning : colors.cardBorder,
+                }}
+              >
+                <Ionicons name="flash" size={18} color={editAggressive ? Colors.warning : colors.textTertiary} />
+                <View style={{ flex: 1 }}>
+                  <Text style={{ color: colors.text, fontWeight: "600", fontSize: 14 }}>Aggressive Mode</Text>
+                  <Text style={{ color: colors.textTertiary, fontSize: 11 }}>
+                    {editAggressive ? "On — trades more often" : "Off — balanced signals"}
+                  </Text>
+                </View>
+                <View style={{
+                  width: 22, height: 22, borderRadius: 7,
+                  backgroundColor: editAggressive ? Colors.warning : colors.card,
+                  borderWidth: 1.5, borderColor: editAggressive ? Colors.warning : colors.cardBorder,
+                  alignItems: "center", justifyContent: "center",
+                }}>
+                  {editAggressive && <Ionicons name="checkmark" size={12} color="#fff" />}
+                </View>
+              </Pressable>
+
+              {/* Actions */}
+              <View style={{ flexDirection: "row", gap: 10 }}>
+                <Pressable
+                  onPress={() => setShowEditModal(false)}
+                  style={{ flex: 1, paddingVertical: 14, borderRadius: 14, backgroundColor: colors.cardSecondary, alignItems: "center", borderWidth: 1, borderColor: colors.cardBorder }}
+                >
+                  <Text style={{ color: colors.text, fontWeight: "700", fontSize: 15 }}>Cancel</Text>
+                </Pressable>
+                <Pressable
+                  onPress={handleSaveSettings}
+                  disabled={editSaving}
+                  style={{ flex: 1, paddingVertical: 14, borderRadius: 14, backgroundColor: Colors.accent, alignItems: "center", opacity: editSaving ? 0.6 : 1 }}
+                >
+                  {editSaving ? (
+                    <ActivityIndicator size="small" color="#fff" />
+                  ) : (
+                    <Text style={{ color: "#fff", fontWeight: "700", fontSize: 15 }}>Save</Text>
+                  )}
+                </Pressable>
+              </View>
+            </View>
+            </ScrollView>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      {/* ── Cash Out Modal ────────────────────────────────────────────── */}
+      <Modal visible={showCashOutModal} transparent animationType="fade" onRequestClose={() => { setShowCashOutModal(false); setCashOutResult(null); }}>
+        <Pressable
+          style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.65)", justifyContent: "center", alignItems: "center", padding: 24 }}
+          onPress={() => { setShowCashOutModal(false); setCashOutResult(null); }}
+        >
+          <Pressable onPress={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 380 }}>
+            <View style={{ backgroundColor: colors.card, borderRadius: 20, padding: 24, gap: 20, borderWidth: 1, borderColor: colors.cardBorder }}>
+              {!cashOutResult ? (
+                <>
+                  <View style={{ alignItems: "center", gap: 12 }}>
+                    <View style={{ width: 56, height: 56, borderRadius: 18, backgroundColor: "rgba(255,169,77,0.12)", alignItems: "center", justifyContent: "center" }}>
+                      <Ionicons name="exit-outline" size={26} color={Colors.warning} />
+                    </View>
+                    <Text style={{ color: colors.text, fontSize: 18, fontWeight: "800", textAlign: "center" }}>Cash Out?</Text>
+                    <Text style={{ color: colors.textSecondary, fontSize: 14, lineHeight: 20, textAlign: "center" }}>
+                      This will close all open positions for{" "}
+                      <Text style={{ fontWeight: "700", color: colors.text }}>"{agent?.name}"</Text>
+                      {" "}and pause the agent. Market orders will be placed immediately.
+                    </Text>
+                  </View>
+
+                  {/* Show positions to close */}
+                  {agentHoldings.length > 0 && (
+                    <View style={{ backgroundColor: colors.cardSecondary, borderRadius: 12, padding: 12, gap: 8 }}>
+                      {agentHoldings.slice(0, 5).map((h) => (
+                        <View key={h.symbol} style={{ flexDirection: "row", justifyContent: "space-between" }}>
+                          <Text style={{ color: colors.text, fontWeight: "600", fontSize: 13 }}>
+                            {h.symbol} ({Math.abs(h.quantity)} shares)
+                          </Text>
+                          <Text style={{
+                            color: h.unrealizedPnl >= 0 ? Colors.success : Colors.danger,
+                            fontWeight: "700", fontSize: 13,
+                          }}>
+                            {h.unrealizedPnl >= 0 ? "+" : ""}{formatCurrency(h.unrealizedPnl)}
+                          </Text>
+                        </View>
+                      ))}
+                    </View>
+                  )}
+
+                  <View style={{ flexDirection: "row", gap: 10 }}>
+                    <Pressable
+                      onPress={() => { setShowCashOutModal(false); setCashOutResult(null); }}
+                      style={{ flex: 1, paddingVertical: 14, borderRadius: 14, backgroundColor: colors.cardSecondary, alignItems: "center", borderWidth: 1, borderColor: colors.cardBorder }}
+                    >
+                      <Text style={{ color: colors.text, fontWeight: "700", fontSize: 15 }}>Cancel</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={handleCashOut}
+                      disabled={cashOutLoading}
+                      style={{ flex: 1, paddingVertical: 14, borderRadius: 14, backgroundColor: Colors.warning, alignItems: "center", opacity: cashOutLoading ? 0.6 : 1 }}
+                    >
+                      {cashOutLoading ? (
+                        <ActivityIndicator size="small" color="#fff" />
+                      ) : (
+                        <Text style={{ color: "#fff", fontWeight: "700", fontSize: 15 }}>Cash Out</Text>
+                      )}
+                    </Pressable>
+                  </View>
+                </>
+              ) : (
+                <>
+                  <View style={{ alignItems: "center", gap: 12 }}>
+                    <View style={{ width: 56, height: 56, borderRadius: 18, backgroundColor: Colors.successBg, alignItems: "center", justifyContent: "center" }}>
+                      <Ionicons name="checkmark-circle" size={26} color={Colors.success} />
+                    </View>
+                    <Text style={{ color: colors.text, fontSize: 18, fontWeight: "800", textAlign: "center" }}>Cashed Out</Text>
+                    <Text style={{ color: colors.textSecondary, fontSize: 14, textAlign: "center" }}>
+                      Agent paused. {cashOutResult.positions.length} position{cashOutResult.positions.length !== 1 ? "s" : ""} queued for closing.
+                    </Text>
+                  </View>
+
+                  <Pressable
+                    onPress={() => { setShowCashOutModal(false); setCashOutResult(null); }}
+                    style={{ paddingVertical: 14, borderRadius: 14, backgroundColor: Colors.accent, alignItems: "center" }}
+                  >
+                    <Text style={{ color: "#fff", fontWeight: "700", fontSize: 15 }}>Done</Text>
+                  </Pressable>
+                </>
+              )}
             </View>
           </Pressable>
         </Pressable>

@@ -1,7 +1,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { isMarketOpen } from "./market-utils.ts";
 import { confirmTrade } from "./groq.ts";
-import { placeOrder, getPositions } from "./alpaca.ts";
+import { placeOrder, getPositions, setAlpacaKeys, clearAlpacaKeys } from "./alpaca.ts";
 import { runStrategy, clearMarketCache, getLastStrategyDiagnostics } from "./strategies.ts";
 import { initTracker, setCurrentAgent, setCustomKeys, type CustomKey } from "./groq-tracker.ts";
 import type { DbAgent, ExecutionResult, AgentLogInsert } from "./types.ts";
@@ -79,16 +79,41 @@ Deno.serve(async (req) => {
       return aR - bR; // agents that just traded go to the end
     });
 
-    // Get Alpaca positions once (shared paper account)
-    const alpacaPositions = await getPositions();
-
     // ── Run agents sequentially with inter-agent spacing ──────
     const results: ExecutionResult[] = [];
     for (let i = 0; i < sortedAgents.length; i++) {
       if (i > 0) await new Promise((r) => setTimeout(r, 500)); // spread load
 
-      // Load this agent's custom AI keys (service-role only RPC returns unmasked keys)
       const agent = sortedAgents[i];
+
+      // ── Configure Alpaca keys per agent mode ──────────────────
+      if (agent.mode === "live") {
+        try {
+          const { data: alpacaKeys } = await supabase.rpc("rpc_get_user_alpaca_keys", {
+            p_user_id: agent.user_id,
+          });
+          if (alpacaKeys?.key_id && alpacaKeys?.key_secret) {
+            setAlpacaKeys(alpacaKeys.key_id, alpacaKeys.key_secret, true);
+          } else {
+            // No keys — pause the agent and skip
+            console.warn(`[run-agents] Live agent ${agent.id} has no Alpaca keys — pausing`);
+            await supabase.from("agents").update({ status: "paused", updated_at: new Date().toISOString() }).eq("id", agent.id);
+            results.push({ agentId: agent.id, agentName: agent.name, success: false, skipped: true, skipReason: "No Alpaca keys configured for live trading" });
+            continue;
+          }
+        } catch (err) {
+          console.error(`[run-agents] Failed to load Alpaca keys for live agent ${agent.id}:`, err);
+          results.push({ agentId: agent.id, agentName: agent.name, success: false, error: "Failed to load Alpaca keys" });
+          continue;
+        }
+      } else {
+        clearAlpacaKeys(); // Use app's default paper keys
+      }
+
+      // Get Alpaca positions for this agent's key set
+      const alpacaPositions = await getPositions();
+
+      // Load this agent's custom AI keys (service-role only RPC returns unmasked keys)
       try {
         const { data: customKeyData } = await supabase.rpc("rpc_get_key_for_agent", {
           p_user_id: agent.user_id,

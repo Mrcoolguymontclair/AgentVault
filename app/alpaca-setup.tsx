@@ -9,6 +9,7 @@ import {
   Platform,
   Alert,
   Linking,
+  ActivityIndicator,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -18,6 +19,16 @@ import { useAuthStore } from "@/store/authStore";
 import { Button } from "@/components/ui/Button";
 import { Colors } from "@/constants/colors";
 import { supabase } from "@/lib/supabase";
+import { formatCurrency } from "@/utils/format";
+
+interface AlpacaAccountInfo {
+  status: string;
+  buying_power: string;
+  portfolio_value: string;
+  equity: string;
+  cash: string;
+  account_number: string;
+}
 
 export default function AlpacaSetupScreen() {
   const { colors } = useTheme();
@@ -29,6 +40,9 @@ export default function AlpacaSetupScreen() {
   const [isSaving, setIsSaving] = useState(false);
   const [existingHint, setExistingHint] = useState<string | null>(null);
   const [hasKeys, setHasKeys] = useState(false);
+  const [isTesting, setIsTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [accountInfo, setAccountInfo] = useState<AlpacaAccountInfo | null>(null);
 
   useEffect(() => {
     if (!authUser?.id) return;
@@ -44,6 +58,56 @@ export default function AlpacaSetupScreen() {
     })();
   }, [authUser?.id]);
 
+  async function testConnection(testKeyId: string, testKeySecret: string) {
+    setIsTesting(true);
+    setTestResult(null);
+    setAccountInfo(null);
+    try {
+      // Try paper first, then live
+      for (const base of [
+        "https://paper-api.alpaca.markets/v2",
+        "https://api.alpaca.markets/v2",
+      ]) {
+        try {
+          const res = await fetch(`${base}/account`, {
+            headers: {
+              "APCA-API-KEY-ID": testKeyId,
+              "APCA-API-SECRET-KEY": testKeySecret,
+            },
+          });
+          if (res.ok) {
+            const data = await res.json();
+            setAccountInfo(data);
+            const isLive = base.includes("api.alpaca.markets/v2") && !base.includes("paper");
+            setTestResult({
+              ok: true,
+              message: `Connected to ${isLive ? "Live" : "Paper"} account`,
+            });
+            setIsTesting(false);
+            return true;
+          }
+        } catch {
+          // try next
+        }
+      }
+      setTestResult({ ok: false, message: "Invalid API keys. Check your Key ID and Secret." });
+      setIsTesting(false);
+      return false;
+    } catch (e: any) {
+      setTestResult({ ok: false, message: e?.message ?? "Connection failed" });
+      setIsTesting(false);
+      return false;
+    }
+  }
+
+  async function handleTestConnection() {
+    if (!keyId.trim() || !keySecret.trim()) {
+      Alert.alert("Missing Keys", "Enter both Key ID and Secret to test.");
+      return;
+    }
+    await testConnection(keyId.trim(), keySecret.trim());
+  }
+
   async function handleSave() {
     if (!keyId.trim() || !keySecret.trim()) {
       Alert.alert("Missing Keys", "Please enter both your API Key ID and Secret.");
@@ -52,6 +116,15 @@ export default function AlpacaSetupScreen() {
     if (!authUser?.id) return;
     setIsSaving(true);
     try {
+      // Test first if not already tested
+      if (!testResult?.ok) {
+        const ok = await testConnection(keyId.trim(), keySecret.trim());
+        if (!ok) {
+          setIsSaving(false);
+          return;
+        }
+      }
+
       const { error } = await supabase.rpc("rpc_save_alpaca_keys", {
         p_user_id: authUser.id,
         p_key_id: keyId.trim(),
@@ -59,6 +132,8 @@ export default function AlpacaSetupScreen() {
       });
       if (error) throw error;
       setIsSaving(false);
+      setHasKeys(true);
+      setExistingHint(keyId.trim().slice(0, 8) + "...");
       Alert.alert("Keys Saved", "Your Alpaca API keys have been saved securely.", [
         { text: "Done", onPress: () => router.back() },
       ]);
@@ -90,6 +165,8 @@ export default function AlpacaSetupScreen() {
             setExistingHint(null);
             setKeyId("");
             setKeySecret("");
+            setAccountInfo(null);
+            setTestResult(null);
           },
         },
       ]
@@ -187,6 +264,49 @@ export default function AlpacaSetupScreen() {
             </View>
           )}
 
+          {/* Account Info (shown when keys are connected and tested) */}
+          {accountInfo && (
+            <View
+              style={{
+                backgroundColor: colors.card,
+                borderRadius: 16,
+                borderWidth: 1,
+                borderColor: colors.cardBorder,
+                padding: 16,
+                gap: 12,
+              }}
+            >
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                <Ionicons name="wallet-outline" size={18} color={Colors.accentLight} />
+                <Text style={{ color: colors.text, fontWeight: "700", fontSize: 15 }}>
+                  Account Info
+                </Text>
+              </View>
+              {[
+                { label: "Status", value: accountInfo.status?.replace("_", " ").toUpperCase() ?? "Unknown", color: accountInfo.status === "ACTIVE" ? Colors.success : Colors.warning },
+                { label: "Buying Power", value: formatCurrency(Number(accountInfo.buying_power ?? 0)), color: colors.text },
+                { label: "Portfolio Value", value: formatCurrency(Number(accountInfo.portfolio_value ?? 0)), color: colors.text },
+                { label: "Cash", value: formatCurrency(Number(accountInfo.cash ?? 0)), color: colors.text },
+                { label: "Equity", value: formatCurrency(Number(accountInfo.equity ?? 0)), color: colors.text },
+              ].map((row) => (
+                <View
+                  key={row.label}
+                  style={{
+                    flexDirection: "row",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    paddingVertical: 6,
+                    borderBottomWidth: 1,
+                    borderBottomColor: colors.divider,
+                  }}
+                >
+                  <Text style={{ color: colors.textSecondary, fontSize: 13 }}>{row.label}</Text>
+                  <Text style={{ color: row.color, fontWeight: "700", fontSize: 14 }}>{row.value}</Text>
+                </View>
+              ))}
+            </View>
+          )}
+
           {/* Instructions */}
           <View
             style={{
@@ -257,7 +377,7 @@ export default function AlpacaSetupScreen() {
             </Text>
             <TextInput
               value={keyId}
-              onChangeText={setKeyId}
+              onChangeText={(v) => { setKeyId(v); setTestResult(null); }}
               placeholder={hasKeys ? existingHint ?? "Enter API Key ID..." : "Enter API Key ID..."}
               placeholderTextColor={colors.textTertiary}
               autoCapitalize="none"
@@ -302,7 +422,7 @@ export default function AlpacaSetupScreen() {
             >
               <TextInput
                 value={keySecret}
-                onChangeText={setKeySecret}
+                onChangeText={(v) => { setKeySecret(v); setTestResult(null); }}
                 placeholder={hasKeys ? "••••••••••••••••" : "Enter Secret Key..."}
                 placeholderTextColor={colors.textTertiary}
                 secureTextEntry={!showSecret}
@@ -325,6 +445,65 @@ export default function AlpacaSetupScreen() {
               </Pressable>
             </View>
           </View>
+
+          {/* Test Result */}
+          {testResult && (
+            <View
+              style={{
+                backgroundColor: testResult.ok ? Colors.successBg : Colors.dangerBg,
+                borderRadius: 12,
+                padding: 12,
+                flexDirection: "row",
+                alignItems: "center",
+                gap: 10,
+                borderWidth: 1,
+                borderColor: testResult.ok ? Colors.success : Colors.danger,
+              }}
+            >
+              <Ionicons
+                name={testResult.ok ? "checkmark-circle" : "alert-circle"}
+                size={18}
+                color={testResult.ok ? Colors.success : Colors.danger}
+              />
+              <Text
+                style={{
+                  color: testResult.ok ? Colors.success : Colors.danger,
+                  fontWeight: "600",
+                  fontSize: 13,
+                  flex: 1,
+                }}
+              >
+                {testResult.message}
+              </Text>
+            </View>
+          )}
+
+          {/* Test Connection button */}
+          <Pressable
+            onPress={handleTestConnection}
+            disabled={isTesting || !keyId.trim() || !keySecret.trim()}
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 8,
+              paddingVertical: 13,
+              borderRadius: 14,
+              borderWidth: 1.5,
+              borderColor: colors.cardBorder,
+              backgroundColor: colors.cardSecondary,
+              opacity: isTesting || !keyId.trim() || !keySecret.trim() ? 0.5 : 1,
+            }}
+          >
+            {isTesting ? (
+              <ActivityIndicator size="small" color={colors.textSecondary} />
+            ) : (
+              <Ionicons name="wifi-outline" size={16} color={colors.textSecondary} />
+            )}
+            <Text style={{ color: colors.textSecondary, fontWeight: "700", fontSize: 14 }}>
+              {isTesting ? "Testing..." : "Test Connection"}
+            </Text>
+          </Pressable>
 
           {/* Security note */}
           <View

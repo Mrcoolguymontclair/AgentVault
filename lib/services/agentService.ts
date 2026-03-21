@@ -156,6 +156,49 @@ export function subscribeToTrades(
     .subscribe();
 }
 
+export interface UpdateAgentSettingsInput {
+  agentId: string;
+  name?: string;
+  budget?: number;
+  aggressive?: boolean;
+  timeHorizon?: string;
+  isPrivate?: boolean;
+}
+
+export async function updateAgentSettings(input: UpdateAgentSettingsInput) {
+  const { data, error } = await supabase.rpc("rpc_update_agent_settings", {
+    p_agent_id: input.agentId,
+    p_name: input.name ?? null,
+    p_budget: input.budget ?? null,
+    p_aggressive: input.aggressive ?? null,
+    p_time_horizon: input.timeHorizon ?? null,
+    p_is_private: input.isPrivate ?? null,
+  });
+  return { data: data as DbAgent | null, error: error?.message ?? null };
+}
+
+export async function cashOutAgent(agentId: string) {
+  const { data, error } = await supabase.rpc("rpc_cash_out_agent", {
+    p_agent_id: agentId,
+  });
+  return { data: data as { agent_id: string; agent_name: string; mode: string; positions: any[] } | null, error: error?.message ?? null };
+}
+
+export async function getPortfolioByMode(userId: string, mode: string) {
+  const { data, error } = await supabase.rpc("rpc_get_portfolio_by_mode", {
+    p_user_id: userId,
+    p_mode: mode,
+  });
+  return { data: data as { budget_total: number; realized_pnl: number; value: number; agent_count: number } | null, error: error?.message ?? null };
+}
+
+export async function checkAlpacaKeyStatus(userId: string) {
+  const { data } = await supabase.rpc("rpc_get_alpaca_key_status", {
+    p_user_id: userId,
+  });
+  return data as { has_keys: boolean; key_id_hint: string | null } | null;
+}
+
 export function subscribeToAgents(
   userId: string,
   onChange: (agent: DbAgent) => void
