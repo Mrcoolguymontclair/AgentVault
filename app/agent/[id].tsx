@@ -924,25 +924,34 @@ function AgentHoldingsSection({
         >
           <Ionicons name="pie-chart-outline" size={28} color={colors.textTertiary} />
           <Text style={{ color: colors.textSecondary, fontSize: 13, textAlign: "center" }}>
-            No open positions. This agent hasn't made any buys yet.
+            No open positions. This agent hasn't made any trades yet.
           </Text>
         </View>
       </View>
     );
   }
 
-  const totalValue = holdings.reduce((s, h) => s + h.currentValue, 0);
   const totalPnl = holdings.reduce((s, h) => s + h.unrealizedPnl, 0);
+  const longHoldings = holdings.filter((h) => h.quantity > 0);
+  const shortHoldings = holdings.filter((h) => h.quantity < 0);
+  const longValue = longHoldings.reduce((s, h) => s + h.currentValue, 0);
   const isPnlPositive = totalPnl >= 0;
 
   return (
     <View style={{ gap: 10 }}>
       {/* Header row */}
       <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-        <Text style={{ color: colors.text, fontSize: 17, fontWeight: "700" }}>Holdings</Text>
+        <Text style={{ color: colors.text, fontSize: 17, fontWeight: "700" }}>
+          Holdings
+          {shortHoldings.length > 0 && (
+            <Text style={{ color: "#818CF8", fontSize: 13, fontWeight: "600" }}>
+              {" "}· {shortHoldings.length} short
+            </Text>
+          )}
+        </Text>
         <View style={{ alignItems: "flex-end" }}>
           <Text style={{ color: colors.text, fontWeight: "700", fontSize: 14 }}>
-            {new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(totalValue)}
+            {new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(longValue)} long
           </Text>
           <Text
             style={{
@@ -964,8 +973,10 @@ function AgentHoldingsSection({
         }}
       >
         {holdings.map((h, i) => {
+          const isShort = h.quantity < 0;
           const isUp = h.unrealizedPnl >= 0;
           const pnlColor = isUp ? Colors.success : Colors.danger;
+          const absQty = Math.abs(h.quantity);
           return (
             <View key={h.symbol}>
               <View style={{ flexDirection: "row", alignItems: "center", padding: 14, gap: 12 }}>
@@ -973,36 +984,54 @@ function AgentHoldingsSection({
                 <View
                   style={{
                     width: 42, height: 42, borderRadius: 13,
-                    backgroundColor: isUp ? Colors.successBg : Colors.dangerBg,
+                    backgroundColor: isShort ? "rgba(129,140,248,0.12)" : (isUp ? Colors.successBg : Colors.dangerBg),
                     alignItems: "center", justifyContent: "center",
                   }}
                 >
-                  <Text style={{ color: pnlColor, fontWeight: "800", fontSize: 11, letterSpacing: -0.3 }}>
+                  <Text style={{
+                    color: isShort ? "#818CF8" : pnlColor,
+                    fontWeight: "800", fontSize: 11, letterSpacing: -0.3,
+                  }}>
                     {h.symbol.slice(0, 4)}
                   </Text>
                 </View>
 
                 {/* Name + detail */}
                 <View style={{ flex: 1, gap: 2 }}>
-                  <Text style={{ color: colors.text, fontWeight: "700", fontSize: 14 }}>
-                    {h.symbol}
-                  </Text>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                    <Text style={{ color: colors.text, fontWeight: "700", fontSize: 14 }}>
+                      {h.symbol}
+                    </Text>
+                    {isShort && (
+                      <View style={{
+                        backgroundColor: "rgba(129,140,248,0.15)", paddingHorizontal: 5,
+                        paddingVertical: 1, borderRadius: 4,
+                      }}>
+                        <Text style={{ color: "#818CF8", fontSize: 9, fontWeight: "800", letterSpacing: 0.3 }}>
+                          SHORT
+                        </Text>
+                      </View>
+                    )}
+                  </View>
                   <Text style={{ color: colors.textTertiary, fontSize: 11 }} numberOfLines={1}>
                     {getCompanyName(h.symbol)}
                   </Text>
                   <Text style={{ color: colors.textTertiary, fontSize: 11, marginTop: 1 }}>
-                    {h.quantity.toFixed(4)} @ avg{" "}
+                    {absQty.toFixed(4)} @ avg{" "}
                     {new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(h.avgCost)}
                   </Text>
                 </View>
 
                 {/* Sparkline */}
-                <Sparkline prices={h.priceHistory} width={52} height={24} color={pnlColor} />
+                <Sparkline prices={h.priceHistory} width={52} height={24} color={isShort ? "#818CF8" : pnlColor} />
 
                 {/* Value + P&L */}
                 <View style={{ alignItems: "flex-end", gap: 2 }}>
                   <Text style={{ color: colors.text, fontWeight: "700", fontSize: 14 }}>
-                    {new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(h.currentValue)}
+                    {isShort
+                      ? new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(absQty * h.lastPrice)
+                      : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(h.currentValue)
+                    }
                   </Text>
                   <View
                     style={{

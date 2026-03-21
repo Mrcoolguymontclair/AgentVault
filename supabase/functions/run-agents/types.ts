@@ -67,6 +67,14 @@ export interface TradeSignal {
    * index.ts will skip the confirmTrade call and use strategyConfidence + reason directly.
    */
   skipAiConfirmation?: boolean;
+  /**
+   * Short-selling flag.
+   * side="sell" + isShort=true → open a new short position (sell shares we don't own).
+   *   notional = % of budget (same as a buy).
+   * side="buy"  + isShort=true → cover an existing short position (buy back).
+   *   notional = dollar value of the short to close (same as a regular sell).
+   */
+  isShort?: boolean;
 }
 
 export interface AIDecision {

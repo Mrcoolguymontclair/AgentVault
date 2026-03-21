@@ -28,6 +28,9 @@ const MODEL    = "llama-3.1-8b-instant";
 const PRIMARY_KEY = Deno.env.get("GROQ_API_KEY")        ?? "";
 const BACKUP_KEY  = Deno.env.get("GROQ_API_KEY_BACKUP") ?? "";
 
+// Log key presence at module load so we can diagnose missing secrets immediately
+console.log(`[groq] PRIMARY_KEY set=${PRIMARY_KEY.length > 0} (len=${PRIMARY_KEY.length}) BACKUP_KEY set=${BACKUP_KEY.length > 0}`);
+
 // ── Module state (reset on each edge function invocation) ────
 let _supabase: ReturnType<typeof createClient> | null = null;
 let _activeKey: "primary" | "backup" = "primary";
@@ -175,6 +178,10 @@ export async function groqComplete(
     }),
   });
 
+  // Always read body as text first so we can log it on any outcome
+  const rawBody = await res.text().catch(() => "");
+  console.log(`[groq] type=${requestType} key=${keyLabel} status=${res.status} body=${rawBody.slice(0, 500)}`);
+
   // On 429, try the backup key once then give up
   if (res.status === 429) {
     if (BACKUP_KEY && _activeKey === "primary") {
@@ -183,17 +190,20 @@ export async function groqComplete(
       _backupActivatedAt = Date.now();
       return groqComplete(messages, maxTokens, requestType, estimatedPromptTokens);
     }
-    const body = await res.text().catch(() => "");
-    throw new Error(`Groq 429 rate-limited: ${body.slice(0, 120)}`);
+    throw new Error(`Groq 429 rate-limited: ${rawBody.slice(0, 120)}`);
   }
 
   if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`Groq ${res.status}: ${body.slice(0, 200)}`);
+    throw new Error(`Groq ${res.status}: ${rawBody.slice(0, 300)}`);
   }
 
-  const data      = await res.json();
-  const content   = data.choices?.[0]?.message?.content ?? "{}";
+  let data: any;
+  try {
+    data = JSON.parse(rawBody);
+  } catch {
+    throw new Error(`Groq response not JSON: ${rawBody.slice(0, 200)}`);
+  }
+  const content = data.choices?.[0]?.message?.content ?? "{}";
   const tokensUsed = Number(data.usage?.total_tokens ?? (estimatedPromptTokens + maxTokens));
 
   _recordUsage(tokensUsed);

@@ -145,29 +145,41 @@ async function runAgent(
     for (const t of allTrades ?? []) {
       const tradeQty = Number(t.quantity);
       const sym = t.symbol;
+      const prevQty = agentPositions[sym] ?? 0;
+
       if (t.side === "buy") {
-        const prevQty = agentPositions[sym] ?? 0;
-        const prevAvg = agentAvgCost[sym] ?? 0;
-        agentPositions[sym] = prevQty + tradeQty;
-        agentAvgCost[sym] = prevQty > 0
-          ? (prevAvg * prevQty + Number(t.price) * tradeQty) / (prevQty + tradeQty)
-          : Number(t.price);
+        if (prevQty < 0) {
+          // Covering a short — move position back toward 0
+          agentPositions[sym] = prevQty + tradeQty;
+        } else {
+          // Long buy — update avg cost
+          const prevAvg = agentAvgCost[sym] ?? 0;
+          agentAvgCost[sym] = prevQty > 0
+            ? (prevAvg * prevQty + Number(t.price) * tradeQty) / (prevQty + tradeQty)
+            : Number(t.price);
+          agentPositions[sym] = prevQty + tradeQty;
+        }
       } else {
-        agentPositions[sym] = Math.max(0, (agentPositions[sym] ?? 0) - tradeQty);
+        // Sell
+        if (prevQty > 0) {
+          // Closing a long
+          agentPositions[sym] = Math.max(0, prevQty - tradeQty);
+        } else {
+          // Opening or adding to a short — track the short entry price
+          agentAvgCost[sym] = Number(t.price);
+          agentPositions[sym] = prevQty - tradeQty; // goes negative
+        }
       }
     }
 
     // ── Available budget ─────────────────────────────────────
+    // Only count positive (long) positions — shorts bring in cash, don't consume budget
     const invested = Object.entries(agentPositions).reduce((sum, [sym, qty]) => {
+      if (qty <= 0) return sum;
       const price = alpacaPositions[sym]?.avg_entry_price ?? agentAvgCost[sym] ?? 0;
       return sum + qty * price;
     }, 0);
     const availableBudget = Math.max(0, budget - invested);
-
-    if (availableBudget < 1) {
-      await logExecution(supabase, agent, { action: "skipped", skip_reason: "Budget fully deployed" });
-      return { ...base, skipped: true, skipReason: "Budget fully deployed" };
-    }
 
     // ── Consecutive no-signal detection ──────────────────────
     // If the last 3 runs all had no signal, temporarily loosen thresholds by 10%
@@ -198,21 +210,37 @@ async function runAgent(
     }
 
     // ── Resolve notional → dollar amount ─────────────────────
-    // For buys: notional is a % of budget.  For sells: notional is total $ (may be partial).
+    // Long buy:      notional = % of budget
+    // Short entry:   notional = % of budget (isShort=true, side=sell)
+    // Long sell:     notional = total $ of position to close
+    // Short cover:   notional = total $ of short to cover (isShort=true, side=buy)
+    const isShortEntry = signal.side === "sell" && signal.isShort === true;
+    const isShortCover = signal.side === "buy"  && signal.isShort === true;
+    const isLongBuy    = signal.side === "buy"  && !signal.isShort;
+
     let dollarAmount: number;
-    if (signal.side === "buy") {
+    if (isLongBuy || isShortEntry) {
+      // notional is a % of budget
       dollarAmount = Math.min(budget * (signal.notional / 100), availableBudget);
     } else {
-      dollarAmount = signal.notional; // already in dollars (full or partial)
+      // Long sell or short cover — notional is already dollars
+      dollarAmount = signal.notional;
     }
 
-    if (dollarAmount < 1) {
+    // Short covers are always allowed even when available budget < 1
+    if (dollarAmount < 1 && !isShortCover) {
       await logExecution(supabase, agent, { action: "skipped", skip_reason: "Trade size too small", signal_detected: true, signal_symbol: signal.symbol, signal_side: signal.side });
       return { ...base, skipped: true, skipReason: "Trade size too small" };
     }
 
-    // ── Portfolio concentration check (40% max per symbol) ───
-    if (signal.side === "buy") {
+    // ── Budget check (skip for short covers — they return cash) ─
+    if (availableBudget < 1 && !isShortCover) {
+      await logExecution(supabase, agent, { action: "skipped", skip_reason: "Budget fully deployed" });
+      return { ...base, skipped: true, skipReason: "Budget fully deployed" };
+    }
+
+    // ── Portfolio concentration check (40% max per symbol, longs only) ──
+    if (isLongBuy) {
       const currentPositionValue = (agentPositions[signal.symbol] ?? 0) * (agentAvgCost[signal.symbol] ?? signal.marketData.currentPrice);
       const projectedValue = currentPositionValue + dollarAmount;
       if (projectedValue > budget * 0.40) {
@@ -261,10 +289,22 @@ async function runAgent(
     // ── Calculate quantity ────────────────────────────────────
     const currentPrice = signal.marketData.currentPrice;
     const rawQty = dollarAmount / currentPrice;
-    // For partial sells: qty is derived from dollarAmount, capped at position size
-    const qty = signal.side === "sell"
-      ? Math.min(Math.floor(dollarAmount / currentPrice), Math.floor(agentPositions[signal.symbol] ?? 0))
-      : Math.floor(rawQty);
+    const currentHeld = agentPositions[signal.symbol] ?? 0;
+
+    let qty: number;
+    if (isShortEntry) {
+      // Sell shares we don't own — no held-position cap
+      qty = Math.floor(rawQty);
+    } else if (isShortCover) {
+      // Buy back up to the full short position size
+      qty = Math.min(Math.floor(rawQty), Math.abs(Math.floor(currentHeld)));
+    } else if (signal.side === "sell") {
+      // Regular sell — cap at long position size
+      qty = Math.min(Math.floor(rawQty), Math.floor(Math.max(0, currentHeld)));
+    } else {
+      // Regular long buy
+      qty = Math.floor(rawQty);
+    }
 
     if (qty <= 0) {
       await logExecution(supabase, agent, { action: "skipped", skip_reason: "Qty rounds to 0", signal_detected: true, signal_symbol: signal.symbol, signal_side: signal.side });
@@ -290,27 +330,65 @@ async function runAgent(
 
     // ── P&L for this trade ────────────────────────────────────
     let tradePnl = 0;
-    if (signal.side === "sell") {
+    if (signal.side === "sell" && !isShortEntry) {
+      // Closing a long position
       const avgCost = agentAvgCost[signal.symbol] ?? fillPrice;
       tradePnl = (fillPrice - avgCost) * qty;
+    } else if (isShortCover) {
+      // Covering a short: profit = (short entry price − cover price) × qty
+      const shortEntryPrice = agentAvgCost[signal.symbol] ?? fillPrice;
+      tradePnl = (shortEntryPrice - fillPrice) * qty;
     }
+    // Short entry (isShortEntry) and long buys: PnL = 0 (realized later)
 
     // ── Log trade to DB ───────────────────────────────────────
-    await supabase.from("trades").insert({
-      agent_id: agent.id,
-      user_id: agent.user_id,
-      symbol: signal.symbol,
-      side: signal.side,
-      quantity: qty,
-      price: fillPrice,
-      pnl: tradePnl,
+    // Try with order-tracking columns first; fall back to base columns if
+    // migration 014 hasn't been applied yet (avoids column-not-found crash).
+    const baseTradeRow = {
+      agent_id:    agent.id,
+      user_id:     agent.user_id,
+      symbol:      signal.symbol,
+      side:        signal.side,
+      quantity:    qty,
+      price:       fillPrice,
+      pnl:         tradePnl,
       executed_at: new Date().toISOString(),
-      alpaca_order_id: alpacaOrderId,
-      order_status: orderStatus,
-    });
+    };
 
-    // ── Update agent stats via RPC (recalculates from trades table) ──────────
-    await supabase.rpc("rpc_update_agent_stats", { p_agent_id: agent.id });
+    const { error: tradeErr } = await supabase.from("trades").insert(
+      alpacaOrderId
+        ? { ...baseTradeRow, alpaca_order_id: alpacaOrderId, order_status: orderStatus }
+        : baseTradeRow
+    );
+
+    if (tradeErr) {
+      // Column doesn't exist yet — retry without order tracking fields
+      if (tradeErr.message.includes("alpaca_order_id") || tradeErr.message.includes("order_status")) {
+        console.warn("[trades.insert] Retrying without order tracking cols (run migration 014):", tradeErr.message);
+        const { error: retryErr } = await supabase.from("trades").insert(baseTradeRow);
+        if (retryErr) throw new Error(`Trade insert failed: ${retryErr.message}`);
+      } else {
+        throw new Error(`Trade insert failed: ${tradeErr.message}`);
+      }
+    }
+
+    // ── Update agent stats (RPC preferred; inline fallback if 014 not run) ───
+    const { error: statsRpcErr } = await supabase.rpc("rpc_update_agent_stats", { p_agent_id: agent.id });
+    if (statsRpcErr) {
+      console.warn("[rpc_update_agent_stats] RPC missing — using inline fallback (run migration 014):", statsRpcErr.message);
+      const newPnl    = Number(agent.pnl) + tradePnl;
+      const newPnlPct = budget > 0 ? (newPnl / budget) * 100 : 0;
+      const newTrades = agent.trades_count + 1;
+      const { data: sellTrades } = await supabase
+        .from("trades").select("pnl").eq("agent_id", agent.id).eq("side", "sell");
+      const sells   = sellTrades ?? [];
+      const winners = sells.filter((t) => Number(t.pnl) > 0).length;
+      const newWinRate = sells.length > 0 ? (winners / sells.length) * 100 : 0;
+      await supabase.from("agents").update({
+        pnl: newPnl, pnl_pct: newPnlPct, trades_count: newTrades,
+        win_rate: newWinRate, updated_at: new Date().toISOString(),
+      }).eq("id", agent.id);
+    }
 
     // ── Portfolio snapshot (upsert today's value) ─────────────
     // Recalculate cumulative PnL for this agent for the snapshot

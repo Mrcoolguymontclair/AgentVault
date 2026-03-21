@@ -4,6 +4,8 @@ import type { BarData } from "./types.ts";
 const BASE = (Deno.env.get("ALPACA_BASE_URL") ?? "https://paper-api.alpaca.markets/v2").replace(/\/$/, "");
 // Market data API — always data.alpaca.markets regardless of paper/live
 const DATA = "https://data.alpaca.markets/v2";
+// Screener API (most-actives, movers)
+const SCREENER = "https://data.alpaca.markets/v1beta1/screener";
 const KEY    = Deno.env.get("ALPACA_API_KEY")    ?? "";
 const SECRET = Deno.env.get("ALPACA_API_SECRET") ?? "";
 
@@ -131,6 +133,71 @@ export async function getNewsBulk(
     }
     return results;
   } catch {
+    return [];
+  }
+}
+
+/**
+ * Top N most-actively-traded symbols right now (by trade count).
+ * Uses the Alpaca screener endpoint — returns symbol list only.
+ */
+export async function getMostActives(top = 20): Promise<string[]> {
+  try {
+    const data = await alpacaFetch(`${SCREENER}/stocks/most-actives?by=trades&top=${top}`);
+    return ((data.most_actives ?? []) as any[])
+      .map((s: any) => String(s.symbol ?? "").toUpperCase())
+      .filter(Boolean);
+  } catch (err) {
+    console.error("[getMostActives] ERROR:", (err as Error).message);
+    return [];
+  }
+}
+
+/**
+ * Top N biggest losing symbols today (by percent change).
+ */
+export async function getTopLosers(top = 20): Promise<string[]> {
+  try {
+    const data = await alpacaFetch(`${SCREENER}/stocks/movers?top=${top}`);
+    return ((data.losers ?? []) as any[])
+      .map((s: any) => String(s.symbol ?? "").toUpperCase())
+      .filter(Boolean);
+  } catch (err) {
+    console.error("[getTopLosers] ERROR:", (err as Error).message);
+    return [];
+  }
+}
+
+/**
+ * Global news stream — no symbol filter, returns all recent articles.
+ * Uses v1beta1/news (the correct endpoint for unfiltered global news).
+ * Used by NewsTrader to scan the entire market for sentiment catalysts.
+ */
+export async function getAllNews(
+  limit = 50
+): Promise<Array<{ headline: string; symbols: string[] }>> {
+  // v1beta1/news is the correct path for global (no-symbol-filter) news
+  const url = `https://data.alpaca.markets/v1beta1/news?limit=${Math.min(limit, 50)}&sort=desc`;
+  console.log(`[getAllNews] GET ${url}`);
+  try {
+    const res = await fetch(url, { headers: HEADERS });
+    console.log(`[getAllNews] status=${res.status}`);
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      console.error(`[getAllNews] HTTP ${res.status} — ${body.slice(0, 300)}`);
+      return [];
+    }
+    const data = await res.json();
+    const articles = (data.news ?? []) as any[];
+    console.log(`[getAllNews] received ${articles.length} articles`);
+    return articles
+      .map((n: any) => ({
+        headline: String(n.headline ?? "").trim(),
+        symbols: ((n.symbols ?? []) as string[]).map((s) => s.toUpperCase()),
+      }))
+      .filter((n) => n.headline.length > 0);
+  } catch (err) {
+    console.error("[getAllNews] ERROR:", (err as Error).message);
     return [];
   }
 }

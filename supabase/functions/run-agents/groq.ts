@@ -3,21 +3,35 @@
  *
  * Groq AI helpers — each function uses the groq-tracker for rate limiting,
  * key rotation, and daily budget management.
- *
- * Token budgets (rough estimates):
- *   confirmTrade       ~200 prompt + 80 completion  = ~280 tokens/call
- *   scoreSentiment     ~180 prompt + 80 completion  = ~260 tokens/call
- *   evalMispricing     ~130 prompt + 80 completion  = ~210 tokens/call
- *   interpretCustom    ~320 prompt + 100 completion = ~420 tokens/call
  */
 
 import { groqComplete, isConservativeMode } from "./groq-tracker.ts";
 
+/**
+ * Parse Groq response content into a JSON object.
+ * Handles plain JSON AND markdown-fenced JSON (```json ... ```) that some
+ * model versions output despite json_object response_format being set.
+ */
 function safeJson(raw: string): Record<string, unknown> {
-  try { return JSON.parse(raw); } catch { return {}; }
+  try {
+    // Strip markdown fences: ```json ... ``` or ``` ... ```
+    const stripped = raw
+      .replace(/^```(?:json)?\s*/i, "")
+      .replace(/```\s*$/i, "")
+      .trim();
+    return JSON.parse(stripped);
+  } catch {
+    // Last-ditch: try to extract the first {...} block from the string
+    const match = raw.match(/\{[\s\S]*\}/);
+    if (match) {
+      try { return JSON.parse(match[0]); } catch { /* fall through */ }
+    }
+    console.error("[safeJson] Failed to parse Groq response:", raw.slice(0, 300));
+    return {};
+  }
 }
 
-// ── confirmTrade ─────────────────────────────────────────────
+// ── confirmTrade ──────────────────────────────────────────────
 
 /** Ask the AI to validate a trade signal. Returns { execute, reasoning, confidence }. */
 export async function confirmTrade(opts: {
@@ -33,53 +47,66 @@ export async function confirmTrade(opts: {
   // Conservative mode: auto-approve technically-valid signals to preserve budget
   if (isConservativeMode()) {
     return {
-      execute:   true,
-      reasoning: "Conservative mode: AI check skipped, technical signal accepted",
+      execute:    true,
+      reasoning:  "Conservative mode: AI check skipped, technical signal accepted",
       confidence: 0.75,
     };
   }
 
-  // Compact prompt — keep under 220 tokens
   const facts = [
     `${opts.strategy}|${opts.symbol}|${opts.side.toUpperCase()}`,
     `Reason: ${opts.reason.slice(0, 100)}`,
     `Price:$${opts.currentPrice.toFixed(2)}`,
-    opts.sma  !== undefined ? `SMA:$${opts.sma.toFixed(2)}`    : null,
-    opts.rsi  !== undefined ? `RSI:${opts.rsi.toFixed(1)}`      : null,
-    opts.dipPct !== undefined ? `Dip:${opts.dipPct.toFixed(1)}%` : null,
+    opts.sma    !== undefined ? `SMA:$${opts.sma.toFixed(2)}`      : null,
+    opts.rsi    !== undefined ? `RSI:${opts.rsi.toFixed(1)}`        : null,
+    opts.dipPct !== undefined ? `Dip:${opts.dipPct.toFixed(1)}%`   : null,
   ].filter(Boolean).join(" ");
+
+  const systemPrompt =
+    "You are a paper-trading risk manager. " +
+    "Output ONLY a raw JSON object — no markdown, no code fences, no explanation. " +
+    'Example: {"execute":true,"reasoning":"signal is technically valid","confidence":0.75}';
+
+  const userPrompt =
+    `Evaluate this trade signal: ${facts}\n` +
+    `Output ONLY raw JSON with these exact fields:\n` +
+    `{"execute":<true or false>,"reasoning":"<10 words max>","confidence":<0.0 to 1.0>}`;
 
   try {
     const raw = await groqComplete(
       [
-        { role: "system", content: "Paper-trading risk manager. JSON only. Be conservative." },
-        {
-          role: "user",
-          content: `Evaluate: ${facts}\nRespond: {"execute":bool,"reasoning":"<20 words","confidence":0.0-1.0}`,
-        },
+        { role: "system", content: systemPrompt },
+        { role: "user",   content: userPrompt },
       ],
-      80,           // max completion tokens
+      80,
       "confirm_trade",
-      200           // estimated prompt tokens
+      200
     );
     const j = safeJson(raw);
+    const confidence = Math.min(1, Math.max(0, Number(j.confidence) || 0));
+    const execute = Boolean(j.execute);
+    console.log(`[confirmTrade] ${opts.symbol} ${opts.side} execute=${execute} confidence=${confidence} reasoning=${j.reasoning}`);
     return {
-      execute:    Boolean(j.execute),
-      reasoning:  String(j.reasoning ?? "No reasoning provided"),
-      confidence: Math.min(1, Math.max(0, Number(j.confidence) || 0)),
+      execute,
+      reasoning:  String(j.reasoning ?? "AI validation"),
+      confidence,
     };
   } catch (err: any) {
     if (err?.message === "CONSERVATIVE_MODE") {
       return { execute: true, reasoning: "Budget conserved — technical signal accepted", confidence: 0.75 };
     }
-    console.error("confirmTrade error:", err);
-    return { execute: false, reasoning: "AI validation unavailable", confidence: 0 };
+    // Groq unavailable — execute the trade on strategy signal alone
+    console.error(`[confirmTrade] Groq failed for ${opts.symbol} ${opts.side}:`, err?.message ?? err);
+    return {
+      execute:    true,
+      reasoning:  "AI unavailable — using strategy signal only",
+      confidence: 0.50,
+    };
   }
 }
 
-// ── scoreSentiment ───────────────────────────────────────────
+// ── scoreSentiment ────────────────────────────────────────────
 
-/** Score news sentiment for a symbol. Returns score in [-1, 1] plus urgency and surprise flag. */
 export async function scoreSentiment(
   symbol: string,
   headlines: string[]
@@ -87,20 +114,23 @@ export async function scoreSentiment(
   if (headlines.length === 0) return { score: 0, summary: "No news", urgency: 0, surprise: false };
   if (isConservativeMode()) return { score: 0, summary: "Conservative mode", urgency: 0, surprise: false };
 
-  // Batch up to 4 headlines, each capped at 80 chars
   const hl = headlines.slice(0, 4).map((h, i) => `${i + 1}.${h.slice(0, 80)}`).join(" ");
+
+  const systemPrompt =
+    "You are a financial sentiment analyst. " +
+    "Output ONLY a raw JSON object — no markdown, no code fences, no explanation.";
+
+  const userPrompt =
+    `${symbol} news headlines: ${hl}\n` +
+    `Output ONLY raw JSON:\n` +
+    `{"score":<-1.0 to 1.0>,"summary":"<10 words>","urgency":<1 to 10>,"surprise":<true or false>}\n` +
+    `score: -1=very bearish, 0=neutral, 1=very bullish. urgency: 1=stale, 10=breaking. surprise=unexpected/not-priced-in.`;
 
   try {
     const raw = await groqComplete(
       [
-        { role: "system", content: "Financial sentiment analyst. JSON only." },
-        {
-          role: "user",
-          content:
-            `${symbol} news: ${hl}\n` +
-            `Respond: {"score":-1to1,"summary":"<15 words","urgency":1-10,"surprise":bool}\n` +
-            `urgency=how time-sensitive(1=stale,10=breaking). surprise=unexpected/not-priced-in.`,
-        },
+        { role: "system", content: systemPrompt },
+        { role: "user",   content: userPrompt },
       ],
       80,
       "sentiment",
@@ -118,18 +148,17 @@ export async function scoreSentiment(
   }
 }
 
-// ── interpretCustomStrategy ──────────────────────────────────
+// ── interpretCustomStrategy ───────────────────────────────────
 
-/** Execute a custom natural-language strategy with compact market data. */
 export async function interpretCustomStrategy(opts: {
-  strategyPrompt: string;          // already capped to 500 chars by strategies.ts
+  strategyPrompt: string;
   marketData: Array<{
-    symbol:      string;
+    symbol:       string;
     currentPrice: number;
-    change1d:    number;
-    sma20:       number;
-    rsi14:       number;
-    momentum5d:  number;
+    change1d:     number;
+    sma20:        number;
+    rsi14:        number;
+    momentum5d:   number;
   }>;
   currentPositions: Record<string, number>;
 }): Promise<{ execute: boolean; symbol: string; side: "buy" | "sell"; reasoning: string; confidence: number }> {
@@ -137,36 +166,48 @@ export async function interpretCustomStrategy(opts: {
     return { execute: false, symbol: "", side: "buy", reasoning: "Conservative mode: custom strategy skipped", confidence: 0 };
   }
 
-  // Compact market line — 8 symbols max, integers for prices to save tokens
   const mkt = opts.marketData.slice(0, 8)
     .map((d) =>
       `${d.symbol}:$${d.currentPrice.toFixed(0)} 1d:${d.change1d.toFixed(1)}% RSI:${d.rsi14.toFixed(0)} SMA:$${d.sma20.toFixed(0)}`
     )
     .join(" | ");
 
-  const held = Object.keys(opts.currentPositions)
+  const longPos  = Object.keys(opts.currentPositions)
     .filter((s) => (opts.currentPositions[s] ?? 0) > 0)
     .join(",") || "none";
+  const shortPos = Object.keys(opts.currentPositions)
+    .filter((s) => (opts.currentPositions[s] ?? 0) < 0)
+    .join(",") || "none";
+
+  const validSymbols = opts.marketData.map((d) => d.symbol).join(", ");
+
+  const systemPrompt =
+    "You are an AI trading agent. Follow the user's strategy instructions exactly. " +
+    "You can buy (go long) or sell (go short / close a long). " +
+    "Output ONLY a raw JSON object — no markdown, no code fences, no explanation.";
+
+  const userPrompt =
+    `Strategy instructions: "${opts.strategyPrompt}"\n` +
+    `Market data: ${mkt}\n` +
+    `Currently long: ${longPos}\n` +
+    `Currently short: ${shortPos}\n` +
+    `Valid symbols: ${validSymbols}\n` +
+    `Output ONLY raw JSON:\n` +
+    `{"execute":<true or false>,"symbol":"<one of the valid symbols>","side":"buy or sell","reasoning":"<15 words>","confidence":<0.0 to 1.0>}`;
 
   try {
     const raw = await groqComplete(
       [
-        { role: "system", content: "AI trading agent. Follow instructions exactly. JSON only." },
-        {
-          role: "user",
-          content:
-            `Instructions: "${opts.strategyPrompt}"\n` +
-            `Market: ${mkt}\nHeld: ${held}\n` +
-            `Respond: {"execute":bool,"symbol":"TICKER","side":"buy","reasoning":"<20 words","confidence":0.0-1.0}`,
-        },
+        { role: "system", content: systemPrompt },
+        { role: "user",   content: userPrompt },
       ],
       100,
       "custom",
       320
     );
     const j = safeJson(raw);
-    const validSymbols = opts.marketData.map((d) => d.symbol);
-    const symbol = validSymbols.includes(String(j.symbol ?? "")) ? String(j.symbol) : "";
+    const validSymbolList = opts.marketData.map((d) => d.symbol);
+    const symbol = validSymbolList.includes(String(j.symbol ?? "")) ? String(j.symbol) : "";
     const side: "buy" | "sell" = j.side === "sell" ? "sell" : "buy";
     return {
       execute:    Boolean(j.execute) && symbol !== "",
@@ -179,18 +220,13 @@ export async function interpretCustomStrategy(opts: {
     if (err?.message === "CONSERVATIVE_MODE") {
       return { execute: false, symbol: "", side: "buy", reasoning: "Conservative mode", confidence: 0 };
     }
-    console.error("interpretCustomStrategy error:", err);
+    console.error("[interpretCustomStrategy] Groq failed:", err?.message ?? err);
     return { execute: false, symbol: "", side: "buy", reasoning: "AI unavailable", confidence: 0 };
   }
 }
 
 // ── newsTraderDecision ────────────────────────────────────────
 
-/**
- * News Trader: one Groq call evaluates all symbols' headlines and picks the
- * strongest sentiment trade. Returns { execute, symbol, side, reasoning,
- * confidence, sentiment_score }.
- */
 export async function newsTraderDecision(opts: {
   headlinesBySymbol: Record<string, string[]>;
   heldSymbols: string[];
@@ -203,59 +239,85 @@ export async function newsTraderDecision(opts: {
   confidence: number;
   sentiment_score: number;
 }> {
-  const EMPTY = { execute: false, symbol: "", side: "buy" as const, reasoning: "No decision", confidence: 0, sentiment_score: 0 };
+  const EMPTY = {
+    execute: false, symbol: "", side: "buy" as const,
+    reasoning: "No decision", confidence: 0, sentiment_score: 0,
+  };
   if (isConservativeMode()) return { ...EMPTY, reasoning: "Conservative mode" };
 
-  // Build compact news block — max 12 symbols, 3 headlines each (60 chars)
-  const newsBlock = Object.entries(opts.headlinesBySymbol)
+  // Sort by headline count (most-covered stories first), take top 20 symbols,
+  // 2 headlines each at 65 chars — keeps the prompt under ~800 tokens.
+  const topEntries = Object.entries(opts.headlinesBySymbol)
     .filter(([, hl]) => hl.length > 0)
-    .slice(0, 12)
-    .map(([sym, hl]) => `${sym}: ${hl.slice(0, 3).map((h) => h.slice(0, 60)).join(" | ")}`)
+    .sort(([, a], [, b]) => b.length - a.length)
+    .slice(0, 20);
+
+  const newsBlock = topEntries
+    .map(([sym, hl]) =>
+      `${sym}: ${hl.slice(0, 2).map((h) => h.slice(0, 65)).join(" | ")}`
+    )
     .join("\n");
 
+  // Only expose symbols that actually appear in the newsBlock — no phantom choices
+  const newsBlockSymbols = topEntries.map(([sym]) => sym);
   const held = opts.heldSymbols.join(",") || "none";
+
+  const systemPrompt =
+    "You are a news-only trading AI. Analyse ONLY the sentiment of the headlines below. " +
+    "Output ONLY a raw JSON object — no markdown, no code fences, no explanation.";
+
+  const userPrompt =
+    `Headlines (ONLY these symbols are valid choices):\n${newsBlock}\n\n` +
+    `Currently holding: ${held}\n` +
+    `Pick the ONE symbol with the STRONGEST bullish or bearish sentiment.\n` +
+    `Output ONLY raw JSON — example: {"execute":true,"symbol":"AAPL","side":"buy","reasoning":"headline says record earnings beat","confidence":0.85,"sentiment_score":0.9}\n` +
+    `Rules: symbol must be one of the symbols above. side is "buy" for bullish, "sell" for bearish. sentiment_score is -1 (very bearish) to +1 (very bullish).`;
+
+  console.log(`[newsTraderDecision] symbols_in_block=${newsBlockSymbols.length} held=${held} threshold=${opts.sentimentThreshold}`);
+  console.log(`[newsTraderDecision] PROMPT:\n${userPrompt.slice(0, 1200)}`);
 
   try {
     const raw = await groqComplete(
       [
-        { role: "system", content: "News-only trading AI. No charts, no prices — ONLY news headlines. JSON only." },
-        {
-          role: "user",
-          content:
-            `Headlines:\n${newsBlock}\n\nCurrently holding: ${held}\n` +
-            `Threshold: ${opts.sentimentThreshold.toFixed(1)}. Don't execute buy if already held.\n` +
-            `Which stock has the STRONGEST positive or negative sentiment right now?\n` +
-            `Respond: {"execute":bool,"symbol":"TICKER","side":"buy"or"sell","reasoning":"<30 words citing specific words in headlines","confidence":0-1,"sentiment_score":-1to1}`,
-        },
+        { role: "system", content: systemPrompt },
+        { role: "user",   content: userPrompt },
       ],
-      120,
+      150,
       "sentiment",
-      400
+      700   // accurate estimate for 20 symbols × 2 headlines
     );
+
+    console.log(`[newsTraderDecision] RAW_RESPONSE: ${raw}`);
     const j = safeJson(raw);
-    const validSymbols = Object.keys(opts.headlinesBySymbol);
-    const symbol = validSymbols.includes(String(j.symbol ?? "")) ? String(j.symbol) : "";
+    console.log(`[newsTraderDecision] PARSED: ${JSON.stringify(j)}`);
+
+    const symbol = newsBlockSymbols.includes(String(j.symbol ?? "")) ? String(j.symbol) : "";
     const side: "buy" | "sell" = j.side === "sell" ? "sell" : "buy";
-    return {
-      execute:         Boolean(j.execute) && symbol !== "",
+    const confidence      = Math.min(1, Math.max(0,  Number(j.confidence)      || 0));
+    const sentiment_score = Math.min(1, Math.max(-1, Number(j.sentiment_score) || 0));
+
+    const result = {
+      execute: Boolean(j.execute) && symbol !== "",
       symbol,
       side,
       reasoning:       String(j.reasoning ?? "News sentiment"),
-      confidence:      Math.min(1, Math.max(0, Number(j.confidence) || 0)),
-      sentiment_score: Math.min(1, Math.max(-1, Number(j.sentiment_score) || 0)),
+      confidence,
+      sentiment_score,
     };
+
+    console.log(`[newsTraderDecision] RESULT: symbol=${result.symbol} execute=${result.execute} score=${sentiment_score.toFixed(2)} confidence=${confidence.toFixed(2)}`);
+    return result;
   } catch (err: any) {
     if (err?.message === "CONSERVATIVE_MODE") return { ...EMPTY, reasoning: "Conservative mode" };
-    console.error("newsTraderDecision error:", err);
+    console.error("[newsTraderDecision] Groq failed:", err?.message ?? err);
     return EMPTY;
   }
 }
 
 // ── blindQuantDecision ────────────────────────────────────────
 
-/** Anonymized asset packet sent to Groq for Blind Quant strategy. */
 export interface AnonAsset {
-  asset_id: string;           // "Asset_A", "Asset_B", …
+  asset_id: string;
   price_change_1d_pct: number;
   price_change_5d_pct: number;
   price_change_20d_pct: number;
@@ -265,16 +327,13 @@ export interface AnonAsset {
   distance_from_20d_low_pct: number;
   volatility_20d: number;
   sma_20_slope: number;
-  bollinger_position: number; // 0 = lower band, 1 = upper band
+  bollinger_position: number;
 }
 
-/**
- * Blind Quant: sends fully anonymized numerical packets — no tickers, no names.
- * Returns { execute, asset_id, side, reasoning, confidence }.
- */
 export async function blindQuantDecision(opts: {
   assets: AnonAsset[];
   heldAssetIds: string[];
+  shortedAssetIds: string[];
   minConfidence: number;
 }): Promise<{
   execute: boolean;
@@ -287,38 +346,50 @@ export async function blindQuantDecision(opts: {
   if (isConservativeMode()) return { ...EMPTY, reasoning: "Conservative mode" };
 
   const assetBlock = opts.assets
-    .map(
-      (a) =>
-        `${a.asset_id}: 1d=${a.price_change_1d_pct.toFixed(2)}% 5d=${a.price_change_5d_pct.toFixed(2)}% ` +
-        `20d=${a.price_change_20d_pct.toFixed(2)}% vol=${a.volume_vs_avg_20d.toFixed(2)}x ` +
-        `RSI=${a.rsi_14.toFixed(0)} hi%=${a.distance_from_20d_high_pct.toFixed(2)} lo%=${a.distance_from_20d_low_pct.toFixed(2)} ` +
-        `bb=${a.bollinger_position.toFixed(2)} slope=${a.sma_20_slope.toFixed(4)} σ=${a.volatility_20d.toFixed(3)}`
+    .map((a) =>
+      `${a.asset_id}: 1d=${a.price_change_1d_pct.toFixed(2)}% 5d=${a.price_change_5d_pct.toFixed(2)}% ` +
+      `20d=${a.price_change_20d_pct.toFixed(2)}% vol=${a.volume_vs_avg_20d.toFixed(2)}x ` +
+      `RSI=${a.rsi_14.toFixed(0)} hi%=${a.distance_from_20d_high_pct.toFixed(2)} lo%=${a.distance_from_20d_low_pct.toFixed(2)} ` +
+      `bb=${a.bollinger_position.toFixed(2)} slope=${a.sma_20_slope.toFixed(4)} σ=${a.volatility_20d.toFixed(3)}`
     )
     .join("\n");
 
-  const held = opts.heldAssetIds.join(",") || "none";
+  const held    = opts.heldAssetIds.join(",")  || "none";
+  const shorted = opts.shortedAssetIds.join(",") || "none";
+  const validIds = opts.assets.map((a) => a.asset_id).join(", ");
+
+  const systemPrompt =
+    "You are a pure quantitative trading AI. Analyse ONLY the numbers provided — no company names, no tickers, no news. " +
+    "You can go long (buy) OR short (sell) based on the data. " +
+    "Output ONLY a raw JSON object — no markdown, no code fences, no explanation.";
+
+  const userPrompt =
+    `Anonymous assets (pure numbers — no ticker identities):\n${assetBlock}\n\n` +
+    `Currently long: ${held}\n` +
+    `Currently short: ${shorted}\n` +
+    `Minimum confidence to act: ${opts.minConfidence.toFixed(1)}\n` +
+    `Valid asset IDs: ${validIds}\n` +
+    `Which asset has the best quantitative risk/reward setup? Choose "buy" for bullish or "sell" for bearish.\n` +
+    `Rules: Do NOT buy an asset already in "Currently long". Do NOT sell an asset already in "Currently short".\n` +
+    `Output ONLY raw JSON:\n` +
+    `{"execute":<true or false>,"asset_id":"<one of the valid IDs>","side":"buy or sell","reasoning":"<20 words citing specific numbers>","confidence":<0.0 to 1.0>}`;
+
+  console.log(`[blindQuantDecision] assets=${opts.assets.length} held=${held} minConf=${opts.minConfidence}`);
 
   try {
     const raw = await groqComplete(
       [
-        { role: "system", content: "Pure quantitative trading AI. No company names, no tickers, no news — ONLY numbers. JSON only." },
-        {
-          role: "user",
-          content:
-            `Anonymous assets (pure math — no ticker names):\n${assetBlock}\n\n` +
-            `Currently holding: ${held}\n` +
-            `Min confidence to act: ${opts.minConfidence.toFixed(1)}. Don't buy if already held.\n` +
-            `Which asset has the best risk/reward setup based purely on the numbers?\n` +
-            `Respond: {"execute":bool,"asset_id":"Asset_X","side":"buy"or"sell","reasoning":"<30 words citing specific numbers","confidence":0-1}`,
-        },
+        { role: "system", content: systemPrompt },
+        { role: "user",   content: userPrompt },
       ],
       120,
       "custom",
       450
     );
+    console.log(`[blindQuantDecision] raw=${raw.slice(0, 300)}`);
     const j = safeJson(raw);
-    const validIds = opts.assets.map((a) => a.asset_id);
-    const asset_id = validIds.includes(String(j.asset_id ?? "")) ? String(j.asset_id) : "";
+    console.log(`[blindQuantDecision] parsed: asset_id=${j.asset_id} execute=${j.execute} side=${j.side} confidence=${j.confidence}`);
+    const asset_id = validIds.split(", ").includes(String(j.asset_id ?? "")) ? String(j.asset_id) : "";
     const side: "buy" | "sell" = j.side === "sell" ? "sell" : "buy";
     return {
       execute:    Boolean(j.execute) && asset_id !== "",
@@ -329,34 +400,39 @@ export async function blindQuantDecision(opts: {
     };
   } catch (err: any) {
     if (err?.message === "CONSERVATIVE_MODE") return { ...EMPTY, reasoning: "Conservative mode" };
-    console.error("blindQuantDecision error:", err);
+    console.error("[blindQuantDecision] Groq failed:", err?.message ?? err);
     return EMPTY;
   }
 }
 
-// ── evalMispricing ───────────────────────────────────────────
+// ── evalMispricing ────────────────────────────────────────────
 
-/** Evaluate prediction-market / mispricing opportunity with Kelly edge. */
 export async function evalMispricing(opts: {
-  symbol:     string;
+  symbol:       string;
   currentPrice: number;
-  rsi:        number;
-  momentum5d: number;
+  rsi:          number;
+  momentum5d:   number;
 }): Promise<{ direction: "buy" | "sell" | "hold"; confidence: number; marketProbability: number; reasoning: string }> {
   if (isConservativeMode()) {
     return { direction: "hold", confidence: 0, marketProbability: 0.5, reasoning: "Conservative mode" };
   }
 
+  const systemPrompt =
+    "You are a quantitative mispricing analyst. " +
+    "Output ONLY a raw JSON object — no markdown, no code fences, no explanation.";
+
+  const userPrompt =
+    `Asset: ${opts.symbol} | Price:$${opts.currentPrice.toFixed(2)} | RSI:${opts.rsi.toFixed(1)} | 5d_momentum:${opts.momentum5d.toFixed(1)}%\n` +
+    `Is this asset mispriced relative to fair value?\n` +
+    `Output ONLY raw JSON:\n` +
+    `{"direction":"buy","confidence":<0.0 to 1.0>,"marketProbability":<0.0 to 1.0>,"reasoning":"<12 words>"}\n` +
+    `direction must be exactly "buy", "sell", or "hold".`;
+
   try {
     const raw = await groqComplete(
       [
-        { role: "system", content: "Quant analyst — mispricing detection. JSON only." },
-        {
-          role: "user",
-          content:
-            `${opts.symbol}: $${opts.currentPrice.toFixed(2)} RSI:${opts.rsi.toFixed(1)} 5d:${opts.momentum5d.toFixed(1)}%\n` +
-            `Respond: {"direction":"buy|sell|hold","confidence":0-1,"marketProbability":0-1,"reasoning":"<15 words"}`,
-        },
+        { role: "system", content: systemPrompt },
+        { role: "user",   content: userPrompt },
       ],
       80,
       "mispricing",
@@ -372,7 +448,8 @@ export async function evalMispricing(opts: {
       marketProbability: Math.min(1, Math.max(0, Number(j.marketProbability) || 0.5)),
       reasoning:         String(j.reasoning ?? ""),
     };
-  } catch {
+  } catch (err: any) {
+    console.error("[evalMispricing] Groq failed:", err?.message ?? err);
     return { direction: "hold", confidence: 0, marketProbability: 0.5, reasoning: "AI unavailable" };
   }
 }
