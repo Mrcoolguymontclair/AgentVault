@@ -1,16 +1,19 @@
 /**
  * groq-tracker.ts
  *
- * Centralised Groq API management for the run-agents edge function:
+ * Centralised AI API management for the run-agents edge function:
  *   • Per-minute token rate limiter (14 400 tokens/min, throttle at 12 000)
  *   • Daily budget guard (450 K tokens/day, conservative mode at 400 K)
+ *   • Custom key chain: user keys (priority order) → app primary Groq → app backup Groq
+ *   • Multi-provider: Groq, OpenAI (OpenAI-compatible), Anthropic (native API)
+ *   • Usage tracking per custom key via rpc_update_key_usage
  *   • Automatic key rotation: primary → backup on 429, rotates back after 60 s
- *   • Usage logging to groq_usage table (fire-and-forget at end of call)
  *
  * Usage pattern in index.ts:
  *   1. initTracker(supabase, dailyTokensUsed)   ← once per cron invocation
- *   2. setCurrentAgent(agent.id)                ← before each agent run
- *   3. groqComplete(messages, maxTokens, type)  ← inside groq.ts helpers
+ *   2. setCustomKeys(userKeys)                  ← before each agent run
+ *   3. setCurrentAgent(agent.id)                ← before each agent run
+ *   4. groqComplete(messages, maxTokens, type)  ← inside groq.ts helpers
  */
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -31,6 +34,16 @@ const BACKUP_KEY  = Deno.env.get("GROQ_API_KEY_BACKUP") ?? "";
 // Log key presence at module load so we can diagnose missing secrets immediately
 console.log(`[groq] PRIMARY_KEY set=${PRIMARY_KEY.length > 0} (len=${PRIMARY_KEY.length}) BACKUP_KEY set=${BACKUP_KEY.length > 0}`);
 
+// ── Custom key type ───────────────────────────────────────────
+export interface CustomKey {
+  id: string;
+  provider: "groq" | "openai" | "anthropic";
+  model_id: string | null;
+  api_key: string;
+  label: string;
+  priority: number;
+}
+
 // ── Module state (reset on each edge function invocation) ────
 let _supabase: ReturnType<typeof createClient> | null = null;
 let _activeKey: "primary" | "backup" = "primary";
@@ -39,6 +52,7 @@ let _inMemory: Array<{ ts: number; tokens: number }> = [];
 let _dailyUsed   = 0;
 let _conservative = false;
 let _currentAgent = "system";
+let _customKeys: CustomKey[] = [];
 
 // ── Init / setters ───────────────────────────────────────────
 
@@ -54,11 +68,20 @@ export function initTracker(
   _backupActivatedAt = null;
   _inMemory          = [];
   _currentAgent      = "system";
+  _customKeys        = [];
 
   if (_conservative) {
     console.warn(
       `[groq-tracker] Starting in conservative mode — ${dailyTokensUsed.toLocaleString()} / ${DAILY_BUDGET.toLocaleString()} tokens used today`
     );
+  }
+}
+
+/** Set the user's custom API keys before each agent run (in priority order). */
+export function setCustomKeys(keys: CustomKey[]): void {
+  _customKeys = [...keys].sort((a, b) => a.priority - b.priority);
+  if (_customKeys.length > 0) {
+    console.log(`[groq-tracker] Custom keys loaded: ${_customKeys.map((k) => `${k.label}(${k.provider})`).join(", ")}`);
   }
 }
 
@@ -136,16 +159,104 @@ async function _logToDb(
   }
 }
 
+async function _updateCustomKeyUsage(keyId: string, tokens: number, error: string | null): Promise<void> {
+  if (!_supabase) return;
+  try {
+    await _supabase.rpc("rpc_update_key_usage", {
+      p_key_id: keyId,
+      p_tokens: tokens,
+      p_error:  error,
+    });
+  } catch (err) {
+    // Non-fatal
+    console.error("[groq-tracker] Failed to update custom key usage:", err);
+  }
+}
+
+// ── Multi-provider AI call ────────────────────────────────────
+
+/**
+ * Make a single AI call to a specific provider/key.
+ * Groq and OpenAI use the OpenAI-compatible format.
+ * Anthropic uses its native /v1/messages format.
+ */
+async function _makeAiCall(
+  provider: "groq" | "openai" | "anthropic",
+  apiKey: string,
+  model: string,
+  messages: Array<{ role: "system" | "user"; content: string }>,
+  maxTokens: number
+): Promise<{ content: string; tokens: number }> {
+  if (provider === "groq" || provider === "openai") {
+    const url = provider === "groq"
+      ? "https://api.groq.com/openai/v1/chat/completions"
+      : "https://api.openai.com/v1/chat/completions";
+
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model,
+        messages,
+        response_format: { type: "json_object" },
+        max_tokens:  maxTokens,
+        temperature: 0.1,
+      }),
+    });
+    const rawBody = await res.text().catch(() => "");
+    if (!res.ok) throw new Error(`${provider} ${res.status}: ${rawBody.slice(0, 200)}`);
+    const data = JSON.parse(rawBody);
+    return {
+      content: data.choices?.[0]?.message?.content ?? "{}",
+      tokens:  Number(data.usage?.total_tokens ?? maxTokens),
+    };
+  } else {
+    // Anthropic — extract system message, use native API format
+    const systemMsg = messages.find((m) => m.role === "system");
+    const userMsgs  = messages.filter((m) => m.role !== "system");
+
+    const body: Record<string, unknown> = {
+      model,
+      messages: userMsgs,
+      max_tokens: maxTokens,
+    };
+    if (systemMsg) body.system = systemMsg.content;
+
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key":         apiKey,
+        "anthropic-version": "2023-06-01",
+        "Content-Type":      "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+    const rawBody = await res.text().catch(() => "");
+    if (!res.ok) throw new Error(`anthropic ${res.status}: ${rawBody.slice(0, 200)}`);
+    const data = JSON.parse(rawBody);
+    return {
+      content: data.content?.[0]?.text ?? "{}",
+      tokens:  Number((data.usage?.input_tokens ?? 0) + (data.usage?.output_tokens ?? 0)),
+    };
+  }
+}
+
 // ── Core API ─────────────────────────────────────────────────
 
 /**
- * Make a Groq chat-completion request with rate limiting and key rotation.
+ * Make an AI chat-completion request with:
+ *   1. User's custom keys tried in priority order
+ *   2. App Groq primary key as fallback
+ *   3. App Groq backup key as final fallback
+ *
+ * Rate-limiting applies only to the app Groq keys.
+ * Custom-key usage is tracked via rpc_update_key_usage.
  *
  * @param messages             Chat messages array
  * @param maxTokens            Hard limit on response tokens
  * @param requestType          One of: confirm_trade | sentiment | mispricing | custom
  * @param estimatedPromptTokens Rough prompt size used for pre-call throttle check
- * @returns Parsed response content string (already JSON when response_format=json_object)
+ * @returns Parsed response content string
  */
 export async function groqComplete(
   messages: Array<{ role: "system" | "user"; content: string }>,
@@ -153,7 +264,30 @@ export async function groqComplete(
   requestType: string,
   estimatedPromptTokens = 250
 ): Promise<string> {
-  // In conservative mode only confirmTrade is allowed (auto-approve path handles it)
+  // ── 1. Try user's custom keys first ──────────────────────
+  for (const ck of _customKeys) {
+    const model = ck.model_id ?? (
+      ck.provider === "groq"      ? MODEL :
+      ck.provider === "openai"    ? "gpt-4o-mini" :
+                                    "claude-haiku-4-20250414"
+    );
+    try {
+      console.log(`[groq-tracker] Trying custom key: ${ck.label} (${ck.provider}/${model})`);
+      const { content, tokens } = await _makeAiCall(ck.provider, ck.api_key, model, messages, maxTokens);
+      // Fire-and-forget usage tracking
+      _updateCustomKeyUsage(ck.id, tokens, null);
+      console.log(`[groq-tracker] Custom key succeeded: ${ck.label} tokens=${tokens}`);
+      return content;
+    } catch (err) {
+      const errStr = String(err).slice(0, 200);
+      console.warn(`[groq-tracker] Custom key failed (${ck.label}): ${errStr}`);
+      _updateCustomKeyUsage(ck.id, 0, errStr);
+      // Continue to next key in chain
+    }
+  }
+
+  // ── 2. Fall back to app Groq keys ────────────────────────
+  // Conservative mode check only applies to app keys (user's own keys bypass it)
   if (_conservative && requestType !== "confirm_trade") {
     throw new Error("CONSERVATIVE_MODE");
   }

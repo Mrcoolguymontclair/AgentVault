@@ -3,7 +3,7 @@ import { isMarketOpen } from "./market-utils.ts";
 import { confirmTrade } from "./groq.ts";
 import { placeOrder, getPositions } from "./alpaca.ts";
 import { runStrategy, clearMarketCache, getLastStrategyDiagnostics } from "./strategies.ts";
-import { initTracker, setCurrentAgent } from "./groq-tracker.ts";
+import { initTracker, setCurrentAgent, setCustomKeys, type CustomKey } from "./groq-tracker.ts";
 import type { DbAgent, ExecutionResult, AgentLogInsert } from "./types.ts";
 
 const CORS = {
@@ -86,8 +86,21 @@ Deno.serve(async (req) => {
     const results: ExecutionResult[] = [];
     for (let i = 0; i < sortedAgents.length; i++) {
       if (i > 0) await new Promise((r) => setTimeout(r, 500)); // spread load
-      setCurrentAgent(sortedAgents[i].id);
-      const result = await runAgent(supabase, sortedAgents[i], alpacaPositions);
+
+      // Load this agent's custom AI keys (service-role only RPC returns unmasked keys)
+      const agent = sortedAgents[i];
+      try {
+        const { data: customKeyData } = await supabase.rpc("rpc_get_key_for_agent", {
+          p_user_id: agent.user_id,
+        });
+        setCustomKeys((customKeyData as CustomKey[] | null) ?? []);
+      } catch (err) {
+        console.warn(`[run-agents] Could not load custom keys for user ${agent.user_id}:`, err);
+        setCustomKeys([]);
+      }
+
+      setCurrentAgent(agent.id);
+      const result = await runAgent(supabase, agent, alpacaPositions);
       results.push(result);
     }
 

@@ -384,6 +384,20 @@ export default function SettingsScreen() {
             )}
           </SettingsSection>
 
+          {/* AI Keys */}
+          <SettingsSection title="AI Keys" colors={colors}>
+            <SettingsRow
+              icon="key-outline"
+              iconBg="rgba(11,92,54,0.10)"
+              iconColor={Colors.accentLight}
+              label="AI API Keys"
+              subtitle="Add your own keys for unlimited agent runs"
+              colors={colors}
+              onPress={() => router.push("/api-keys" as any)}
+              chevron
+            />
+          </SettingsSection>
+
           {/* Account */}
           <SettingsSection title="Account" colors={colors}>
             <SettingsRow
