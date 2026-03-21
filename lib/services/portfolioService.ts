@@ -124,6 +124,66 @@ export async function fetchCurrentPrices(symbols: string[]): Promise<Record<stri
   }
 }
 
+/**
+ * Build a portfolio value chart from trade history when no daily snapshots exist.
+ * Starts at $10,000 and plots cumulative realized PnL at each trade date,
+ * with `currentValue` as the final point (includes unrealized P&L).
+ */
+export async function buildChartFromTrades(
+  userId: string,
+  currentValue: number,
+  days: number
+): Promise<ChartPoint[]> {
+  const since = new Date();
+  since.setDate(since.getDate() - days);
+  const sinceDate = since.toISOString().split("T")[0];
+  const today = new Date().toISOString().split("T")[0];
+
+  const { data } = await supabase
+    .from("trades")
+    .select("executed_at, pnl")
+    .eq("user_id", userId)
+    .order("executed_at", { ascending: true });
+
+  const rows = (data as { executed_at: string; pnl: number }[] | null) ?? [];
+
+  if (rows.length === 0) {
+    return [
+      { date: sinceDate, value: 10000 },
+      { date: today, value: currentValue },
+    ];
+  }
+
+  // Build cumulative PnL keyed by trade date
+  let cumPnl = 0;
+  const dateToValue: Record<string, number> = {};
+  for (const row of rows) {
+    cumPnl += Number(row.pnl ?? 0);
+    const date = (row.executed_at as string).split("T")[0];
+    dateToValue[date] = 10000 + cumPnl;
+  }
+
+  const allDates = Object.keys(dateToValue).sort();
+  const prevDates = allDates.filter((d) => d < sinceDate);
+  const startValue =
+    prevDates.length > 0 ? dateToValue[prevDates[prevDates.length - 1]] : 10000;
+  const windowDates = allDates.filter((d) => d >= sinceDate);
+
+  const points: ChartPoint[] = [{ date: sinceDate, value: startValue }];
+  for (const date of windowDates) {
+    points.push({ date, value: dateToValue[date] });
+  }
+
+  // Final point = live portfolio value (includes unrealized P&L)
+  if (points[points.length - 1].date === today) {
+    points[points.length - 1].value = currentValue;
+  } else {
+    points.push({ date: today, value: currentValue });
+  }
+
+  return points;
+}
+
 /** Fetch SPY daily bars from the get-market-bars edge function. */
 export async function fetchSpyBars(days: number): Promise<{ date: string; close: number }[]> {
   try {

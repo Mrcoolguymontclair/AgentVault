@@ -86,7 +86,7 @@ export function MultiLineChart({ lines, width, isDark }: MultiLineProps) {
         })}
         {/* Y midline */}
         <SvgText x={2} y={toY((yMin + yMax) / 2) - 2} fontSize={9} fill={svgTextColor}>
-          {formatAxisValue((yMin + yMax) / 2)}
+          {formatAxisValue((yMin + yMax) / 2, maxV - minV)}
         </SvgText>
       </Svg>
       {/* Legend */}
@@ -119,12 +119,13 @@ function catmullRomPath(pts: { x: number; y: number }[]): string {
   return d;
 }
 
-function formatAxisValue(v: number): string {
-  if (Math.abs(v) >= 10000)
+function formatAxisValue(v: number, range = 0): string {
+  if (Math.abs(v) >= 1000) {
+    if (range < 200) return `$${(v / 1000).toFixed(2)}k`;
+    if (range < 2000) return `$${(v / 1000).toFixed(1)}k`;
     return `$${(v / 1000).toFixed(0)}k`;
-  if (Math.abs(v) >= 1000)
-    return `$${(v / 1000).toFixed(1)}k`;
-  return `$${v.toFixed(0)}`;
+  }
+  return `$${Math.round(v)}`;
 }
 
 function formatAxisDate(dateStr: string): string {
@@ -213,8 +214,8 @@ export function PortfolioChart({ data, width, isPositive, isDark, loading, spyDa
   const maxV = Math.max(...allValues);
   const range = Math.max(maxV - minV, 1);
 
-  // Add 10% padding to y range
-  const yPad = range * 0.1;
+  // Add padding: at least 0.5% of absolute value so labels differ for tiny ranges
+  const yPad = Math.max(range * 0.1, Math.abs(minV + maxV) * 0.0025, 1);
   const yMin = minV - yPad;
   const yMax = maxV + yPad;
   const yRange = yMax - yMin;
@@ -249,9 +250,9 @@ export function PortfolioChart({ data, width, isPositive, isDark, loading, spyDa
         { v: yMin, y: PADDING.top + drawHeight - 4, label: formatAxisPct(yMin) },
       ]
     : [
-        { v: yMax, y: PADDING.top + 4, label: formatAxisValue(yMax) },
-        { v: yMin + yRange / 2, y: PADDING.top + drawHeight / 2, label: formatAxisValue(yMin + yRange / 2) },
-        { v: yMin, y: PADDING.top + drawHeight - 4, label: formatAxisValue(yMin) },
+        { v: yMax, y: PADDING.top + 4, label: formatAxisValue(yMax, range) },
+        { v: yMin + yRange / 2, y: PADDING.top + drawHeight / 2, label: formatAxisValue(yMin + yRange / 2, range) },
+        { v: yMin, y: PADDING.top + drawHeight - 4, label: formatAxisValue(yMin, range) },
       ];
 
   // X axis labels: first, middle, last

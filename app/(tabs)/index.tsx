@@ -28,6 +28,7 @@ import { formatCurrency, formatPercent } from "@/utils/format";
 import { Colors } from "@/constants/colors";
 import {
   fetchPortfolioSnapshots,
+  buildChartFromTrades,
   fetchSpyBars,
   buildSpyOverlay,
   fetchAllAgentSnapshots,
@@ -186,6 +187,12 @@ export default function HomeScreen() {
   // ─── Cache key ────────────────────────────────────────────────────────────
   const cacheKey = `dashboard_v2_${authUser?.id}`;
 
+  // Ref so loadChartData always uses the latest portfolio value without stale closures
+  const portfolioValueRef = useRef(portfolioValue);
+  portfolioValueRef.current = portfolioValue;
+  // Track when livePortfolioValue was last used to rebuild the chart
+  const prevLiveValueRef = useRef<number | null>(null);
+
   // ─── Load chart data ──────────────────────────────────────────────────────
   const loadChartData = useCallback(
     async (tf: Timeframe, fromCache = false) => {
@@ -214,16 +221,9 @@ export default function HomeScreen() {
 
       const hasRealData = data.length >= 2;
 
-      if (!hasRealData) {
-        const days = tf === "1W" ? 7 : tf === "1M" ? 30 : tf === "3M" ? 90 : 180;
-        const now = new Date();
-        const start = new Date(now);
-        start.setDate(start.getDate() - days);
-        const baseValue = portfolioValue;
-        data = [
-          { date: start.toISOString().split("T")[0], value: baseValue },
-          { date: now.toISOString().split("T")[0], value: baseValue },
-        ];
+      if (!hasRealData && authUser?.id) {
+        const days = tf === "1W" ? 7 : tf === "1M" ? 30 : tf === "3M" ? 90 : 365;
+        data = await buildChartFromTrades(authUser.id, portfolioValueRef.current, days);
       }
 
       setChartData(data);
@@ -302,6 +302,18 @@ export default function HomeScreen() {
       loadChartData(timeframe, false);
     }
   }, [totalPnL]);
+
+  // Rebuild chart once live portfolio value is computed (so trade-based chart shows real endpoint)
+  useEffect(() => {
+    if (
+      livePortfolioValue !== null &&
+      livePortfolioValue !== prevLiveValueRef.current &&
+      authUser?.id
+    ) {
+      prevLiveValueRef.current = livePortfolioValue;
+      loadChartData(timeframe, false);
+    }
+  }, [livePortfolioValue, timeframe, authUser?.id]);
 
   // Market status ticks every minute
   useEffect(() => {
@@ -808,8 +820,8 @@ export default function HomeScreen() {
 
           {statsLoading ? (
             <StatsSkeleton colors={colors} />
-          ) : stats && stats.totalTrades > 0 ? (
-            <StatsGrid stats={stats} colors={colors} />
+          ) : stats && (stats.totalTrades > 0 || holdings.length > 0) ? (
+            <StatsGrid stats={stats} holdings={holdings} colors={colors} />
           ) : (
             <View
               style={{
@@ -1216,16 +1228,49 @@ function AllocationBar({ holdings, totalValue, colors }: {
 }
 
 // ─── StatsGrid ────────────────────────────────────────────────────────────────
-function StatsGrid({ stats, colors }: { stats: PortfolioStats; colors: any }) {
+function StatsGrid({ stats, holdings, colors }: { stats: PortfolioStats; holdings: Holding[]; colors: any }) {
+  // ── Position-based fallback metrics (used when no closed trades yet) ────────
+  const profitablePositions = holdings.filter((h) => h.unrealizedPnl > 0);
+  const posWinRate = holdings.length > 0 ? (profitablePositions.length / holdings.length) * 100 : 0;
+  const avgPosPnl =
+    holdings.length > 0
+      ? holdings.reduce((s, h) => s + h.unrealizedPnl, 0) / holdings.length
+      : 0;
+  const bestPos = holdings.reduce<Holding | null>(
+    (b, h) => (b === null || h.unrealizedPnl > b.unrealizedPnl ? h : b), null
+  );
+  const worstPos = holdings.reduce<Holding | null>(
+    (w, h) => (w === null || h.unrealizedPnl < w.unrealizedPnl ? h : w), null
+  );
+
+  // Use trade-based values when available; fall back to position data
+  const usePosFallback = stats.winRate === 0 && holdings.length > 0;
+  const effectiveWinRate = usePosFallback ? posWinRate : stats.winRate;
+  const effectiveAvgPnl = stats.avgTradePnl !== 0 ? stats.avgTradePnl : avgPosPnl;
+  const effectiveBestSymbol =
+    stats.bestTradePnl > 0.01
+      ? stats.bestTradeSymbol
+      : bestPos && bestPos.unrealizedPnl > 0.01
+      ? bestPos.symbol
+      : "—";
+  const effectiveBestPnl =
+    stats.bestTradePnl > 0.01 ? stats.bestTradePnl : (bestPos?.unrealizedPnl ?? 0);
+  const effectiveWorstSymbol =
+    stats.worstTradePnl < -0.01
+      ? stats.worstTradeSymbol
+      : worstPos && worstPos.unrealizedPnl < -0.01
+      ? worstPos.symbol
+      : "—";
+  const effectiveWorstPnl =
+    stats.worstTradePnl < -0.01 ? stats.worstTradePnl : (worstPos?.unrealizedPnl ?? 0);
+
+  // ── Sharpe ──────────────────────────────────────────────────────────────────
   const sharpeColor =
     stats.sharpeRatio === null ? colors.textSecondary
     : stats.sharpeRatio >= 1 ? Colors.success
     : stats.sharpeRatio >= 0 ? Colors.warning
     : Colors.danger;
-
-  const sharpeValue =
-    stats.sharpeRatio === null ? "—"
-    : stats.sharpeRatio.toFixed(2);
+  const sharpeValue = stats.sharpeRatio !== null ? stats.sharpeRatio.toFixed(2) : "N/A";
 
   const activeSinceStr = stats.activeSince
     ? new Date(stats.activeSince).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
@@ -1239,12 +1284,12 @@ function StatsGrid({ stats, colors }: { stats: PortfolioStats; colors: any }) {
       valueColor: sharpeColor,
       iconColor: sharpeColor,
       iconBg: sharpeColor + "18",
-      hint: "Risk-adjusted return",
+      hint: stats.sharpeRatio !== null ? "Risk-adjusted return" : "Need more trade history",
     },
     {
       icon: "trending-down-outline",
       label: "Max Drawdown",
-      value: stats.maxDrawdownPct > 0 ? `-${stats.maxDrawdownPct.toFixed(1)}%` : "—",
+      value: `${stats.maxDrawdownPct > 0 ? `-${stats.maxDrawdownPct.toFixed(1)}` : "0.0"}%`,
       valueColor: stats.maxDrawdownPct > 10 ? Colors.danger : stats.maxDrawdownPct > 5 ? Colors.warning : Colors.success,
       iconColor: Colors.danger,
       iconBg: Colors.dangerBg,
@@ -1253,42 +1298,42 @@ function StatsGrid({ stats, colors }: { stats: PortfolioStats; colors: any }) {
     {
       icon: "trophy-outline",
       label: "Win Rate",
-      value: stats.totalTrades > 0 ? `${stats.winRate.toFixed(1)}%` : "—",
-      valueColor: stats.winRate >= 55 ? Colors.success : stats.winRate >= 45 ? Colors.warning : Colors.danger,
+      value: `${effectiveWinRate.toFixed(1)}%`,
+      valueColor: effectiveWinRate >= 55 ? Colors.success : effectiveWinRate >= 45 ? Colors.warning : Colors.danger,
       iconColor: Colors.gold,
       iconBg: "rgba(212,175,55,0.15)",
-      hint: "Profitable trades",
+      hint: usePosFallback ? "Profitable positions" : "Profitable trades",
     },
     {
       icon: "cash-outline",
-      label: "Avg Trade P&L",
-      value: stats.totalTrades > 0 ? formatCurrency(stats.avgTradePnl, true) : "—",
-      valueColor: stats.avgTradePnl >= 0 ? Colors.success : Colors.danger,
-      iconColor: stats.avgTradePnl >= 0 ? Colors.success : Colors.danger,
-      iconBg: stats.avgTradePnl >= 0 ? Colors.successBg : Colors.dangerBg,
-      hint: "Average per trade",
+      label: stats.avgTradePnl !== 0 ? "Avg Trade P&L" : "Avg Position P&L",
+      value: formatCurrency(effectiveAvgPnl, true),
+      valueColor: effectiveAvgPnl >= 0 ? Colors.success : Colors.danger,
+      iconColor: effectiveAvgPnl >= 0 ? Colors.success : Colors.danger,
+      iconBg: effectiveAvgPnl >= 0 ? Colors.successBg : Colors.dangerBg,
+      hint: stats.avgTradePnl !== 0 ? "Average per trade" : "Avg unrealized P&L",
     },
     {
       icon: "arrow-up-circle-outline",
       label: "Best Trade",
-      value: stats.bestTradeSymbol !== "—"
-        ? `${stats.bestTradeSymbol} +${formatCurrency(stats.bestTradePnl, true)}`
+      value: effectiveBestSymbol !== "—"
+        ? `${effectiveBestSymbol} +${formatCurrency(effectiveBestPnl, true)}`
         : "—",
       valueColor: Colors.success,
       iconColor: Colors.success,
       iconBg: Colors.successBg,
-      hint: "Single best trade",
+      hint: stats.bestTradePnl > 0.01 ? "Single best trade" : "Best open position",
     },
     {
       icon: "arrow-down-circle-outline",
       label: "Worst Trade",
-      value: stats.worstTradeSymbol !== "—"
-        ? `${stats.worstTradeSymbol} ${formatCurrency(stats.worstTradePnl, true)}`
+      value: effectiveWorstSymbol !== "—"
+        ? `${effectiveWorstSymbol} ${formatCurrency(effectiveWorstPnl, true)}`
         : "—",
       valueColor: Colors.danger,
       iconColor: Colors.danger,
       iconBg: Colors.dangerBg,
-      hint: "Biggest single loss",
+      hint: stats.worstTradePnl < -0.01 ? "Biggest single loss" : "Worst open position",
     },
     {
       icon: "swap-horizontal-outline",
