@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import {
   View,
   Text,
@@ -18,11 +18,13 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { CardSkeleton } from "@/components/ui/LoadingSkeleton";
+import { Sparkline } from "@/components/ui/Sparkline";
 import { DeploySheet } from "@/components/agents/DeploySheet";
 import { formatCurrency, formatPercent } from "@/utils/format";
 import { Colors } from "@/constants/colors";
 import { STRATEGIES, RISK_CONFIG } from "@/constants/strategies";
 import type { StrategyId } from "@/constants/strategies";
+import { fetchAgentPnlHistories } from "@/lib/services/portfolioService";
 
 type FilterStatus = "all" | AgentStatus;
 
@@ -41,13 +43,23 @@ export default function AgentsScreen() {
   const [filter, setFilter] = useState<FilterStatus>("all");
   const [refreshing, setRefreshing] = useState(false);
   const [showDeploy, setShowDeploy] = useState(false);
+  const [pnlHistories, setPnlHistories] = useState<Record<string, number[]>>({});
 
   const filtered = filter === "all" ? agents : agents.filter((a) => a.status === filter);
   const activeCount = agents.filter((a) => a.status === "active").length;
 
+  const loadSparklines = useCallback(async () => {
+    if (agents.length === 0) return;
+    const histories = await fetchAgentPnlHistories(agents.map((a) => a.id), 30);
+    setPnlHistories(histories);
+  }, [agents]);
+
+  useEffect(() => { loadSparklines(); }, [loadSparklines]);
+
   async function onRefresh() {
     setRefreshing(true);
     if (authUser?.id) await loadAgents(authUser.id);
+    await loadSparklines();
     setRefreshing(false);
   }
 
@@ -191,6 +203,7 @@ export default function AgentsScreen() {
               key={agent.id}
               agent={agent}
               colors={colors}
+              pnlHistory={pnlHistories[agent.id] ?? []}
               onPress={() => router.push(`/agent/${agent.id}` as any)}
               onToggle={() => toggleAgent(agent.id)}
             />
@@ -214,11 +227,13 @@ export default function AgentsScreen() {
 function AgentCard({
   agent,
   colors,
+  pnlHistory,
   onPress,
   onToggle,
 }: {
   agent: Agent;
   colors: any;
+  pnlHistory: number[];
   onPress: () => void;
   onToggle: () => void;
 }) {
@@ -285,8 +300,19 @@ function AgentCard({
         </View>
       </View>
 
-      {/* Divider */}
-      <View style={{ height: 1, backgroundColor: colors.divider, marginBottom: 14 }} />
+      {/* Divider + Sparkline */}
+      <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 14, gap: 8 }}>
+        <View style={{ flex: 1, height: 1, backgroundColor: colors.divider }} />
+        {pnlHistory.length >= 2 && (
+          <Sparkline
+            prices={pnlHistory}
+            width={80}
+            height={28}
+            color={agent.pnl >= 0 ? Colors.success : Colors.danger}
+            strokeWidth={1.5}
+          />
+        )}
+      </View>
 
       {/* Stats Row */}
       <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>

@@ -82,6 +82,14 @@ export async function deleteAgent(agentId: string) {
   return { error: error?.message ?? null };
 }
 
+export async function updateAgentPrivacy(agentId: string, isPrivate: boolean) {
+  const { error } = await supabase
+    .from("agents")
+    .update({ is_private: isPrivate })
+    .eq("id", agentId);
+  return { error: error?.message ?? null };
+}
+
 export async function updateAgentStatus(agentId: string, status: AgentStatus) {
   const { error } = await supabase.rpc("rpc_update_agent_status", {
     p_agent_id: agentId,

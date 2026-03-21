@@ -10,7 +10,7 @@ interface Props {
 }
 
 export function Sparkline({ prices, width = 64, height = 28, color, strokeWidth = 1.5 }: Props) {
-  const filtered = prices.filter((p) => isFinite(p) && p > 0);
+  const filtered = prices.filter((p) => isFinite(p));
 
   if (filtered.length < 2) {
     const y = height / 2;

@@ -27,10 +27,15 @@ import { formatCurrency, formatPercent } from "@/utils/format";
 import { Colors } from "@/constants/colors";
 import {
   fetchPortfolioSnapshots,
+  fetchSpyBars,
+  buildSpyOverlay,
+  fetchAllAgentSnapshots,
   getMarketStatus,
+  AGENT_CHART_COLORS,
   type ChartPoint,
   type Timeframe,
 } from "@/lib/services/portfolioService";
+import { MultiLineChart } from "@/components/ui/PortfolioChart";
 import {
   fetchPortfolioHoldings,
   fetchPortfolioStats,
@@ -102,6 +107,15 @@ export default function HomeScreen() {
   const [balanceVisible, setBalanceVisible] = useState(true);
   const [chartWidth, setChartWidth] = useState(0);
   const [marketStatus, setMarketStatus] = useState(getMarketStatus());
+  const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
+
+  // SPY overlay
+  const [showSpy, setShowSpy] = useState(false);
+  const [spyBars, setSpyBars] = useState<{ date: string; close: number }[]>([]);
+
+  // Multi-agent chart view
+  const [chartView, setChartView] = useState<"total" | "agents">("total");
+  const [agentSnapshots, setAgentSnapshots] = useState<Record<string, ChartPoint[]>>({});
 
   // Holdings + stats state
   const [holdings, setHoldings] = useState<Holding[]>([]);
@@ -225,6 +239,18 @@ export default function HomeScreen() {
     setStatsLoading(false);
   }, [authUser?.id]);
 
+  // ─── SPY bars ─────────────────────────────────────────────────────────────
+  useEffect(() => {
+    fetchSpyBars(365).then(setSpyBars);
+  }, []);
+
+  // ─── Agent snapshots for multi-agent chart ────────────────────────────────
+  useEffect(() => {
+    if (chartView === "agents" && filteredAgents.length > 0) {
+      fetchAllAgentSnapshots(filteredAgents.map((a) => a.id), timeframe).then(setAgentSnapshots);
+    }
+  }, [chartView, timeframe, filteredAgents.length]);
+
   // ─── Init ─────────────────────────────────────────────────────────────────
   useEffect(() => {
     loadChartData(timeframe, true);
@@ -259,8 +285,15 @@ export default function HomeScreen() {
         loadHoldingsAndStats(),
       ]);
     }
+    setLastRefreshed(new Date());
     setRefreshing(false);
   }, [authUser?.id, timeframe, loadChartData, loadAgents, loadTrades, loadHoldingsAndStats]);
+
+  // Auto-refresh every 60 seconds
+  useEffect(() => {
+    const timer = setInterval(() => { onRefresh(); }, 60000);
+    return () => clearInterval(timer);
+  }, [onRefresh]);
 
   // ─── Live trading confirmation ─────────────────────────────────────────
   function handleModeToggle(mode: TradingMode) {
@@ -326,7 +359,7 @@ export default function HomeScreen() {
             </Text>
           </View>
 
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
             <View
               style={{
                 flexDirection: "row",
@@ -345,6 +378,20 @@ export default function HomeScreen() {
                 {marketStatus.label}
               </Text>
             </View>
+            <Pressable
+              onPress={onRefresh}
+              style={{
+                width: 34, height: 34, borderRadius: 10,
+                backgroundColor: colors.card, borderWidth: 1, borderColor: colors.cardBorder,
+                alignItems: "center", justifyContent: "center",
+              }}
+            >
+              <Ionicons
+                name={refreshing ? "sync" : "refresh-outline"}
+                size={16}
+                color={refreshing ? Colors.accent : colors.textSecondary}
+              />
+            </Pressable>
             <BellButton />
             <Pressable
               style={{
@@ -492,44 +539,103 @@ export default function HomeScreen() {
               </View>
             </View>
 
-            {/* Timeframe selector */}
-            <View style={{ flexDirection: "row", paddingHorizontal: 20, gap: 4, marginBottom: 8 }}>
-              {TIMEFRAMES.map((tf) => (
-                <Pressable
-                  key={tf}
-                  onPress={() => setTimeframe(tf)}
-                  style={{
-                    flex: 1,
-                    paddingVertical: 6,
-                    borderRadius: 8,
-                    backgroundColor: timeframe === tf ? Colors.accent : "transparent",
-                    alignItems: "center",
-                    borderWidth: 1,
-                    borderColor: timeframe === tf ? Colors.accent : colors.cardBorder,
-                  }}
-                >
-                  <Text
+            {/* Timeframe selector + controls row */}
+            <View style={{ paddingHorizontal: 20, marginBottom: 8, gap: 8 }}>
+              <View style={{ flexDirection: "row", gap: 4 }}>
+                {TIMEFRAMES.map((tf) => (
+                  <Pressable
+                    key={tf}
+                    onPress={() => setTimeframe(tf)}
                     style={{
-                      color: timeframe === tf ? "#FFF" : colors.textSecondary,
-                      fontSize: 12,
-                      fontWeight: "700",
+                      flex: 1,
+                      paddingVertical: 6,
+                      borderRadius: 8,
+                      backgroundColor: timeframe === tf ? Colors.accent : "transparent",
+                      alignItems: "center",
+                      borderWidth: 1,
+                      borderColor: timeframe === tf ? Colors.accent : colors.cardBorder,
                     }}
                   >
-                    {tf}
+                    <Text
+                      style={{
+                        color: timeframe === tf ? "#FFF" : colors.textSecondary,
+                        fontSize: 12,
+                        fontWeight: "700",
+                      }}
+                    >
+                      {tf}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+
+              {/* Chart view toggle + SPY overlay */}
+              <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+                <View style={{ flexDirection: "row", backgroundColor: colors.cardSecondary, borderRadius: 8, padding: 2, gap: 2 }}>
+                  {(["total", "agents"] as const).map((view) => (
+                    <Pressable
+                      key={view}
+                      onPress={() => setChartView(view)}
+                      style={{
+                        paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6,
+                        backgroundColor: chartView === view ? colors.card : "transparent",
+                      }}
+                    >
+                      <Text style={{ color: chartView === view ? colors.text : colors.textTertiary, fontSize: 11, fontWeight: "700" }}>
+                        {view === "total" ? "Total" : "By Agent"}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+
+                <Pressable
+                  onPress={() => setShowSpy((v) => !v)}
+                  style={{
+                    flexDirection: "row", alignItems: "center", gap: 5,
+                    paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8,
+                    backgroundColor: showSpy ? "rgba(120,120,120,0.15)" : colors.cardSecondary,
+                    borderWidth: 1, borderColor: showSpy ? "rgba(160,160,160,0.3)" : colors.cardBorder,
+                  }}
+                >
+                  <View style={{ width: 14, height: 2, borderRadius: 1, borderStyle: "dashed", borderWidth: 1, borderColor: showSpy ? "#888" : colors.textTertiary }} />
+                  <Text style={{ color: showSpy ? colors.text : colors.textTertiary, fontSize: 11, fontWeight: "700" }}>
+                    vs S&P 500
                   </Text>
                 </Pressable>
-              ))}
+              </View>
+
+              {/* Updated timestamp */}
+              {lastRefreshed && (
+                <Text style={{ color: colors.textTertiary, fontSize: 10, textAlign: "right" }}>
+                  Updated {timeAgo(lastRefreshed.toISOString())}
+                </Text>
+              )}
             </View>
 
             <View onLayout={(e) => setChartWidth(e.nativeEvent.layout.width)} style={{ paddingBottom: 8 }}>
               {chartWidth > 0 && (
-                <PortfolioChart
-                  data={chartData}
-                  width={chartWidth}
-                  isPositive={totalPnL >= 0}
-                  isDark={isDark}
-                  loading={chartLoading}
-                />
+                chartView === "agents" ? (
+                  <MultiLineChart
+                    lines={filteredAgents.slice(0, 8).map((a, i) => ({
+                      id: a.id,
+                      label: a.name,
+                      data: agentSnapshots[a.id] ?? [],
+                      color: AGENT_CHART_COLORS[i % AGENT_CHART_COLORS.length],
+                    }))}
+                    width={chartWidth}
+                    isDark={isDark}
+                  />
+                ) : (
+                  <PortfolioChart
+                    data={chartData}
+                    width={chartWidth}
+                    isPositive={totalPnL >= 0}
+                    isDark={isDark}
+                    loading={chartLoading}
+                    spyData={buildSpyOverlay(spyBars, chartData)}
+                    showSpy={showSpy}
+                  />
+                )
               )}
             </View>
           </View>
@@ -721,7 +827,7 @@ export default function HomeScreen() {
                 agent={agent}
                 colors={colors}
                 isDark={isDark}
-                onPress={() => router.push("/(tabs)/agents")}
+                onPress={() => router.push(`/agent/${agent.id}` as any)}
               />
             ))
           )}

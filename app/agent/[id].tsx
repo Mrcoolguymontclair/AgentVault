@@ -8,6 +8,7 @@ import {
   Modal,
   ActivityIndicator,
   Share,
+  Switch,
   Platform,
   Animated,
 } from "react-native";
@@ -17,7 +18,29 @@ import { Ionicons } from "@expo/vector-icons";
 import { useTheme } from "@/hooks/useTheme";
 import { useAuthStore } from "@/store/authStore";
 import { useAgentStore } from "@/store/agentStore";
-import { fetchAgentTrades, fetchPublicAgent, type DbTrade } from "@/lib/services/agentService";
+import { fetchAgentTrades, fetchPublicAgent, updateAgentPrivacy, type DbTrade } from "@/lib/services/agentService";
+import { supabase } from "@/lib/supabase";
+
+interface StrategyGeneration {
+  id: string;
+  parent_id: string | null;
+  generation_number: number;
+  strategy_rules: string;
+  mutation_description: string | null;
+  status: "testing" | "graduated" | "killed";
+  total_trades: number;
+  total_pnl: number;
+  win_rate: number;
+  sharpe_ratio: number;
+  vs_spy_pct: number;
+  insight: string | null;
+  graduated: boolean;
+  killed: boolean;
+  kill_reason: string | null;
+  test_start_date: string;
+  test_end_date: string | null;
+  created_at: string;
+}
 import { fetchLastSignal, fetchAgentLogs } from "@/lib/services/debugService";
 import { fetchAgentHoldings, getCompanyName, type AgentHolding } from "@/lib/services/holdingsService";
 import { Sparkline } from "@/components/ui/Sparkline";
@@ -68,6 +91,11 @@ export default function AgentDetailScreen() {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [agentHoldings, setAgentHoldings] = useState<AgentHolding[]>([]);
   const [holdingsLoading, setHoldingsLoading] = useState(true);
+  const [isPrivate, setIsPrivate] = useState(false);
+  const [privacyLoading, setPrivacyLoading] = useState(false);
+  const [generations, setGenerations] = useState<StrategyGeneration[]>([]);
+  const [generationsLoading, setGenerationsLoading] = useState(false);
+  const [expandedRules, setExpandedRules] = useState<string | null>(null);
 
   // Fade-in on mount (native driver only — web always visible)
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -90,6 +118,7 @@ export default function AgentDetailScreen() {
       const ownAgent = agents.find((a) => a.id === id);
       if (ownAgent) {
         setAgent(ownAgent);
+        setIsPrivate(ownAgent.isPrivate ?? false);
         setIsOwnAgent(true);
         setPageLoading(false);
       } else {
@@ -155,6 +184,18 @@ export default function AgentDetailScreen() {
       const holdings = await fetchAgentHoldings(id);
       setAgentHoldings(holdings);
       setHoldingsLoading(false);
+
+      // Load strategy generations (for Strategy Lab agents)
+      if (agentStrategy === "strategy_lab") {
+        setGenerationsLoading(true);
+        const { data: genData } = await supabase
+          .from("strategy_generations")
+          .select("*")
+          .eq("agent_id", id)
+          .order("generation_number", { ascending: true });
+        setGenerations((genData as StrategyGeneration[] | null) ?? []);
+        setGenerationsLoading(false);
+      }
     }
 
     load();
@@ -261,6 +302,24 @@ export default function AgentDetailScreen() {
       setRunLoading(false);
     }
   }, [agent, notify]);
+
+  const handlePrivacyToggle = useCallback(async (value: boolean) => {
+    if (!agent || !isOwnAgent) return;
+    // Check plan for Pro/Pro+ requirement
+    const plan = authUser?.user_metadata?.plan ?? "free";
+    if (plan === "free") {
+      Alert.alert("Pro Required", "Public agents require a Pro or Pro+ subscription.");
+      return;
+    }
+    setPrivacyLoading(true);
+    setIsPrivate(value);
+    const { error } = await updateAgentPrivacy(agent.id, value);
+    if (error) {
+      setIsPrivate(!value);
+      Alert.alert("Error", "Failed to update privacy setting.");
+    }
+    setPrivacyLoading(false);
+  }, [agent, isOwnAgent, authUser]);
 
   const handleShare = useCallback(async () => {
     if (!agent) return;
@@ -637,6 +696,58 @@ export default function AgentDetailScreen() {
                 </Text>
               </View>
             </Pressable>
+
+            {/* Privacy Toggle */}
+            {(() => {
+              const plan = authUser?.user_metadata?.plan ?? "free";
+              const isPro = plan === "pro" || plan === "elite";
+              return (
+                <View
+                  style={{
+                    backgroundColor: colors.card, borderRadius: 14, borderWidth: 1,
+                    borderColor: colors.cardBorder, padding: 14,
+                    flexDirection: "row", alignItems: "center", gap: 12,
+                    opacity: isPro ? 1 : 0.6,
+                  }}
+                >
+                  <View
+                    style={{
+                      width: 38, height: 38, borderRadius: 11,
+                      backgroundColor: isPrivate ? Colors.accentBg : Colors.successBg,
+                      alignItems: "center", justifyContent: "center",
+                    }}
+                  >
+                    <Ionicons
+                      name={isPrivate ? "lock-closed-outline" : "globe-outline"}
+                      size={18}
+                      color={isPrivate ? Colors.accentLight : Colors.success}
+                    />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ color: colors.text, fontWeight: "700", fontSize: 14 }}>
+                      {isPrivate ? "Private Agent" : "Public Agent"}
+                    </Text>
+                    <Text style={{ color: colors.textTertiary, fontSize: 12, marginTop: 1 }}>
+                      {isPro
+                        ? (isPrivate ? "Only you can see this agent" : "Visible on leaderboard and social")
+                        : "Upgrade to Pro to make agents public"}
+                    </Text>
+                  </View>
+                  {isPro ? (
+                    <Switch
+                      value={!isPrivate}
+                      onValueChange={(v) => handlePrivacyToggle(!v)}
+                      disabled={privacyLoading}
+                      trackColor={{ false: colors.cardBorder, true: Colors.accentBg }}
+                      thumbColor={!isPrivate ? Colors.accent : colors.textTertiary}
+                      ios_backgroundColor={colors.cardBorder}
+                    />
+                  ) : (
+                    <Ionicons name="lock-closed" size={18} color={colors.textTertiary} />
+                  )}
+                </View>
+              );
+            })()}
           </>
         )}
 
@@ -794,6 +905,17 @@ export default function AgentDetailScreen() {
               </>
             ) : null}
           </Card>
+        )}
+
+        {/* ── Strategy Lab Section ──────────────────────────────────── */}
+        {agent.strategy === "strategy_lab" && (
+          <StrategyLabSection
+            generations={generations}
+            loading={generationsLoading}
+            expandedRules={expandedRules}
+            onToggleRules={(id) => setExpandedRules((prev) => (prev === id ? null : id))}
+            colors={colors}
+          />
         )}
 
         {/* ── Holdings Section ──────────────────────────────────────── */}
@@ -1071,6 +1193,194 @@ function InfoRow({ label, value, icon, colors }: { label: string; value: string;
         <Text style={{ color: colors.textSecondary, fontSize: 14 }}>{label}</Text>
       </View>
       <Text style={{ color: colors.text, fontWeight: "600", fontSize: 14 }}>{value}</Text>
+    </View>
+  );
+}
+
+// ─── Strategy Lab Section ──────────────────────────────────────────────────────
+function StrategyLabSection({
+  generations,
+  loading,
+  expandedRules,
+  onToggleRules,
+  colors,
+}: {
+  generations: StrategyGeneration[];
+  loading: boolean;
+  expandedRules: string | null;
+  onToggleRules: (id: string) => void;
+  colors: any;
+}) {
+  const testing = generations.filter((g) => g.status === "testing");
+  const graduated = generations.filter((g) => g.status === "graduated");
+  const killed = generations.filter((g) => g.status === "killed");
+  const latestInsight = generations.filter((g) => g.insight).slice(-1)[0]?.insight ?? null;
+  const currentGen = generations.reduce((max, g) => Math.max(max, g.generation_number), 0);
+
+  const STATUS_COLOR: Record<string, string> = {
+    testing: Colors.warning,
+    graduated: Colors.success,
+    killed: Colors.danger,
+  };
+
+  const genCard = (g: StrategyGeneration) => {
+    const pnlColor = g.total_pnl >= 0 ? Colors.success : Colors.danger;
+    const statusColor = STATUS_COLOR[g.status] ?? colors.textSecondary;
+    const isExpanded = expandedRules === g.id;
+
+    return (
+      <View
+        key={g.id}
+        style={{
+          backgroundColor: colors.card, borderRadius: 14, borderWidth: 1,
+          borderColor: g.status === "killed" ? Colors.danger + "30" : g.status === "graduated" ? Colors.success + "30" : colors.cardBorder,
+          padding: 14, gap: 10,
+          opacity: g.status === "killed" ? 0.6 : 1,
+        }}
+      >
+        {/* Header row */}
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <Text style={{ color: statusColor, fontSize: 11, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.5 }}>
+            {g.status === "graduated" ? "Graduated" : g.status === "killed" ? "Killed" : "Testing"}
+          </Text>
+          <Text style={{ color: colors.textTertiary, fontSize: 11 }}>
+            · Gen {g.generation_number}
+          </Text>
+          {g.parent_id && (
+            <Text style={{ color: colors.textTertiary, fontSize: 10 }}>↳ variant</Text>
+          )}
+          <View style={{ flex: 1 }} />
+          <Text style={{ color: pnlColor, fontWeight: "700", fontSize: 13 }}>
+            {g.total_pnl >= 0 ? "+" : ""}{g.total_pnl.toFixed(2)}
+          </Text>
+        </View>
+
+        {/* Mutation description */}
+        {g.mutation_description && (
+          <Text style={{ color: colors.textSecondary, fontSize: 12, fontStyle: "italic" }}>
+            {g.mutation_description}
+          </Text>
+        )}
+
+        {/* Kill reason */}
+        {g.kill_reason && (
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: Colors.dangerBg, borderRadius: 8, padding: 8 }}>
+            <Ionicons name="close-circle-outline" size={14} color={Colors.danger} />
+            <Text style={{ color: Colors.danger, fontSize: 12, flex: 1 }}>{g.kill_reason}</Text>
+          </View>
+        )}
+
+        {/* Stats */}
+        <View style={{ flexDirection: "row", gap: 12 }}>
+          {[
+            { label: "Trades", value: `${g.total_trades}` },
+            { label: "Win %", value: g.total_trades > 0 ? `${g.win_rate.toFixed(1)}%` : "—" },
+            { label: "vs SPY", value: g.total_trades > 0 ? `${g.vs_spy_pct >= 0 ? "+" : ""}${g.vs_spy_pct.toFixed(1)}%` : "—" },
+          ].map((s) => (
+            <View key={s.label} style={{ alignItems: "center", gap: 2 }}>
+              <Text style={{ color: colors.text, fontWeight: "700", fontSize: 13 }}>{s.value}</Text>
+              <Text style={{ color: colors.textTertiary, fontSize: 10, textTransform: "uppercase", letterSpacing: 0.3 }}>{s.label}</Text>
+            </View>
+          ))}
+        </View>
+
+        {/* View Rules button */}
+        <Pressable
+          onPress={() => onToggleRules(g.id)}
+          style={{
+            flexDirection: "row", alignItems: "center", gap: 6, alignSelf: "flex-start",
+            paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8,
+            backgroundColor: colors.cardSecondary, borderWidth: 1, borderColor: colors.cardBorder,
+          }}
+        >
+          <Ionicons name={isExpanded ? "chevron-up" : "document-text-outline"} size={13} color={colors.textSecondary} />
+          <Text style={{ color: colors.textSecondary, fontSize: 12, fontWeight: "600" }}>
+            {isExpanded ? "Hide Rules" : "View Rules"}
+          </Text>
+        </Pressable>
+
+        {/* Expanded rules */}
+        {isExpanded && (
+          <View style={{ backgroundColor: colors.cardSecondary, borderRadius: 10, padding: 12 }}>
+            <Text style={{ color: colors.text, fontSize: 13, lineHeight: 19 }}>{g.strategy_rules}</Text>
+          </View>
+        )}
+      </View>
+    );
+  };
+
+  return (
+    <View style={{ gap: 16 }}>
+      {/* Lab header */}
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+        <View style={{ width: 34, height: 34, borderRadius: 10, backgroundColor: Colors.accentBg, alignItems: "center", justifyContent: "center" }}>
+          <Text style={{ fontSize: 18 }}>🧬</Text>
+        </View>
+        <View style={{ flex: 1 }}>
+          <Text style={{ color: colors.text, fontSize: 17, fontWeight: "800" }}>Strategy Lab</Text>
+          {currentGen > 0 && (
+            <Text style={{ color: colors.textTertiary, fontSize: 12 }}>
+              Generation {currentGen} · {graduated.length} graduated · {testing.length} testing
+            </Text>
+          )}
+        </View>
+      </View>
+
+      {loading && (
+        <View style={{ padding: 20, alignItems: "center" }}>
+          <ActivityIndicator color={Colors.accent} />
+        </View>
+      )}
+
+      {!loading && generations.length === 0 && (
+        <View style={{ backgroundColor: colors.card, borderRadius: 14, borderWidth: 1, borderColor: colors.cardBorder, borderStyle: "dashed", padding: 24, alignItems: "center", gap: 8 }}>
+          <Text style={{ fontSize: 32 }}>🧪</Text>
+          <Text style={{ color: colors.textSecondary, fontSize: 14, textAlign: "center" }}>
+            The lab is warming up. After the first market close, it will analyze your agents and begin evolving strategies.
+          </Text>
+        </View>
+      )}
+
+      {/* Latest AI Insight */}
+      {latestInsight && (
+        <View style={{ backgroundColor: Colors.accentBg, borderRadius: 14, padding: 14, gap: 8, borderWidth: 1, borderColor: Colors.accent + "30" }}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+            <Ionicons name="bulb-outline" size={16} color={Colors.accentLight} />
+            <Text style={{ color: Colors.accentLight, fontWeight: "700", fontSize: 13 }}>Latest Insight</Text>
+          </View>
+          <Text style={{ color: colors.text, fontSize: 13, lineHeight: 19 }}>{latestInsight}</Text>
+        </View>
+      )}
+
+      {/* Active test variants */}
+      {testing.length > 0 && (
+        <View style={{ gap: 8 }}>
+          <Text style={{ color: Colors.warning, fontWeight: "700", fontSize: 13, textTransform: "uppercase", letterSpacing: 0.5 }}>
+            Testing ({testing.length})
+          </Text>
+          {testing.map(genCard)}
+        </View>
+      )}
+
+      {/* Graduated strategies */}
+      {graduated.length > 0 && (
+        <View style={{ gap: 8 }}>
+          <Text style={{ color: Colors.success, fontWeight: "700", fontSize: 13, textTransform: "uppercase", letterSpacing: 0.5 }}>
+            Graduated ({graduated.length})
+          </Text>
+          {graduated.map(genCard)}
+        </View>
+      )}
+
+      {/* Killed variants */}
+      {killed.length > 0 && (
+        <View style={{ gap: 8 }}>
+          <Text style={{ color: Colors.danger, fontWeight: "700", fontSize: 13, textTransform: "uppercase", letterSpacing: 0.5 }}>
+            Killed ({killed.length})
+          </Text>
+          {killed.map(genCard)}
+        </View>
+      )}
     </View>
   );
 }

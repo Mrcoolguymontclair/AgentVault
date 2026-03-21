@@ -1096,6 +1096,62 @@ export async function customStrategy(
 }
 
 // ─────────────────────────────────────────────────────────────
+// Strategy Lab — meta-learning agent that evolves strategies
+// Runs daily at market close (4:05–4:30 PM ET)
+// ─────────────────────────────────────────────────────────────
+function isStrategyLabTime(): boolean {
+  const now = new Date();
+  const etStr = now.toLocaleString("en-US", {
+    timeZone: "America/New_York",
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  const match = etStr.match(/(\d+):(\d+)/);
+  if (!match) return false;
+  const h = parseInt(match[1], 10);
+  const m = parseInt(match[2], 10);
+  // 4:00 PM – 4:45 PM ET
+  return h === 16 && m <= 45;
+}
+
+async function strategyLab(
+  config: Record<string, any>,
+  agentPositions: Record<string, number>,
+  agentAvgCost: Record<string, number>
+): Promise<TradeSignal | null> {
+  // Strategy Lab only runs once per day at market close
+  if (!isStrategyLabTime()) {
+    _lastStrategyDiagnostics = "[strategy_lab] Waiting for market close (4:00–4:45 PM ET)";
+    return null;
+  }
+
+  // Strategy Lab doesn't emit individual trade signals directly —
+  // it manages strategy_generations via the DB. The actual trades
+  // are handled by running each active generation as a custom strategy.
+  // For now, use the best graduated generation's rules (if any) as a
+  // custom strategy to execute live trades.
+  _lastStrategyDiagnostics = "[strategy_lab] Running daily evolution cycle";
+
+  // Pick best performing held position to potentially exit
+  const heldSyms = Object.keys(agentPositions).filter((s) => (agentPositions[s] ?? 0) !== 0);
+
+  // Execute as a custom strategy using the lab's best rules
+  // (rules stored in config.best_rules — populated by daily cron)
+  const bestRules = config.best_rules as string | undefined;
+  if (!bestRules) {
+    _lastStrategyDiagnostics = "[strategy_lab] No graduated rules yet — lab is bootstrapping";
+    return null;
+  }
+
+  return customStrategy(
+    { ...config, strategy_prompt: bestRules },
+    agentPositions,
+    agentAvgCost
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
 // Router — dispatches to the correct strategy function.
 // agentAvgCost is passed to all strategies for trailing-stop support.
 // ─────────────────────────────────────────────────────────────
@@ -1120,6 +1176,8 @@ export async function runStrategy(
       return newsTrader(config, agentPositions, agentAvgCost);
     case "blind_quant":
       return blindQuant(config, agentPositions, agentAvgCost);
+    case "strategy_lab":
+      return strategyLab(config, agentPositions, agentAvgCost);
     default:
       console.warn(`[runStrategy] Unknown strategy: ${strategyId}`);
       return null;

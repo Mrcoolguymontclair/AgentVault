@@ -1,5 +1,11 @@
 import { supabase } from "@/lib/supabase";
 
+// Agent sparkline / chart constants
+const AGENT_CHART_COLORS = [
+  "#3B82F6", "#22C55E", "#F59E0B", "#EF4444", "#8B5CF6",
+  "#EC4899", "#14B8A6", "#F97316",
+];
+
 export interface ChartPoint {
   date: string; // ISO date "YYYY-MM-DD"
   value: number;
@@ -99,6 +105,92 @@ export function generateSyntheticPortfolioData(
 
   return points;
 }
+
+/** Fetch SPY daily bars from the get-market-bars edge function. */
+export async function fetchSpyBars(days: number): Promise<{ date: string; close: number }[]> {
+  try {
+    const { data, error } = await supabase.functions.invoke("get-market-bars", {
+      body: { symbol: "SPY", days },
+    });
+    if (error || !data?.bars) return [];
+    return data.bars as { date: string; close: number }[];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Normalize SPY bars to % change from first point, filtered to the
+ * date range of portfolioData, so both lines start at 0%.
+ */
+export function buildSpyOverlay(
+  spyBars: { date: string; close: number }[],
+  portfolioData: ChartPoint[]
+): ChartPoint[] {
+  if (spyBars.length < 2 || portfolioData.length < 2) return [];
+  const startDate = portfolioData[0].date;
+  const endDate = portfolioData[portfolioData.length - 1].date;
+  const filtered = spyBars.filter((b) => b.date >= startDate && b.date <= endDate);
+  if (filtered.length < 2) return [];
+  const base = filtered[0].close;
+  return filtered.map((b) => ({
+    date: b.date,
+    value: ((b.close - base) / base) * 100,
+  }));
+}
+
+/** Batch-fetch pnl_pct history for sparklines on agent cards. */
+export async function fetchAgentPnlHistories(
+  agentIds: string[],
+  days = 30
+): Promise<Record<string, number[]>> {
+  if (agentIds.length === 0) return {};
+  const since = new Date();
+  since.setDate(since.getDate() - days);
+  const sinceDate = since.toISOString().split("T")[0];
+
+  const { data } = await supabase
+    .from("portfolio_snapshots")
+    .select("agent_id, pnl_pct, snapshot_date")
+    .in("agent_id", agentIds)
+    .gte("snapshot_date", sinceDate)
+    .order("snapshot_date", { ascending: true });
+
+  const result: Record<string, number[]> = {};
+  for (const row of (data as { agent_id: string; pnl_pct: number }[] | null) ?? []) {
+    if (!result[row.agent_id]) result[row.agent_id] = [];
+    result[row.agent_id].push(Number(row.pnl_pct));
+  }
+  return result;
+}
+
+/** Fetch per-agent ChartPoints for the multi-agent chart view. */
+export async function fetchAllAgentSnapshots(
+  agentIds: string[],
+  timeframe: Timeframe
+): Promise<Record<string, ChartPoint[]>> {
+  if (agentIds.length === 0) return {};
+  const days = TIMEFRAME_DAYS[timeframe];
+  const since = new Date();
+  since.setDate(since.getDate() - days);
+  const sinceDate = since.toISOString().split("T")[0];
+
+  const { data } = await supabase
+    .from("portfolio_snapshots")
+    .select("agent_id, snapshot_date, value")
+    .in("agent_id", agentIds)
+    .gte("snapshot_date", sinceDate)
+    .order("snapshot_date", { ascending: true });
+
+  const result: Record<string, ChartPoint[]> = {};
+  for (const row of (data as { agent_id: string; snapshot_date: string; value: number }[] | null) ?? []) {
+    if (!result[row.agent_id]) result[row.agent_id] = [];
+    result[row.agent_id].push({ date: row.snapshot_date, value: Number(row.value) });
+  }
+  return result;
+}
+
+export { AGENT_CHART_COLORS };
 
 export function getMarketStatus(): {
   status: "open" | "premarket" | "afterhours" | "closed";

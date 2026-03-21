@@ -7,7 +7,8 @@ export type StrategyId =
   | "dca_plus"
   | "custom"
   | "news_trader"
-  | "blind_quant";
+  | "blind_quant"
+  | "strategy_lab";
 
 export type ModelId = "groq_llama" | "claude_haiku" | "claude_sonnet";
 
@@ -203,6 +204,20 @@ export const STRATEGIES: Strategy[] = [
     risk: "medium",
     nameSuggestions: ["My Strategy", "Alpha Rules", "Custom Bot", "Rule Engine", "My Playbook"],
     params: [],
+  },
+  {
+    id: "strategy_lab",
+    name: "Strategy Lab",
+    tagline: "Evolves smarter strategies by learning from every trade",
+    description:
+      "A meta-learning agent that automatically experiments with strategy variants, keeps what works, and kills what doesn't. Starts with simple rules and evolves them over time using AI-driven analysis.",
+    icon: "🧬",
+    risk: "medium",
+    nameSuggestions: ["Evo Bot", "Darwin AI", "Lab Rat", "Gene Trader", "Alpha Lab"],
+    params: [
+      { key: "test_budget", label: "Test Budget", hint: "Budget per strategy variant ($)", min: 100, max: 2000, step: 100, unit: "$", default: 500 },
+      { key: "max_generations", label: "Max Generations", hint: "Max simultaneous test variants", min: 3, max: 9, step: 3, unit: "", default: 3 },
+    ],
   },
 ];
 
