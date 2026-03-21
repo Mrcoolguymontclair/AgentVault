@@ -15,6 +15,7 @@ import { router } from "expo-router";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useTheme } from "@/hooks/useTheme";
 import { useAuthStore } from "@/store/authStore";
+import { useUserStore } from "@/store/userStore";
 import { useAgentStore, type Agent } from "@/store/agentStore";
 import { AnimatedNumber } from "@/components/ui/AnimatedNumber";
 import { PortfolioChart } from "@/components/ui/PortfolioChart";
@@ -96,6 +97,7 @@ const TIMEFRAMES: Timeframe[] = ["1W", "1M", "3M", "ALL"];
 export default function HomeScreen() {
   const { colors, isDark } = useTheme();
   const { user: authUser } = useAuthStore();
+  const { user, refreshProfile } = useUserStore();
   const { agents, recentTrades } = useAgentStore();
 
   const [tradingMode, setTradingMode] = useState<TradingMode>("paper");
@@ -136,6 +138,20 @@ export default function HomeScreen() {
     }).start();
   }, []);
 
+  // Spin animation for the refresh button
+  const spinAnim = useRef(new Animated.Value(0)).current;
+  const spinDeg = spinAnim.interpolate({ inputRange: [0, 1], outputRange: ["0deg", "360deg"] });
+  useEffect(() => {
+    if (refreshing) {
+      spinAnim.setValue(0);
+      Animated.loop(
+        Animated.timing(spinAnim, { toValue: 1, duration: 700, useNativeDriver: true })
+      ).start();
+    } else {
+      spinAnim.setValue(0);
+    }
+  }, [refreshing]);
+
   // ─── Derived stats ────────────────────────────────────────────────────────
   const filteredAgents = agents.filter((a) => a.mode === tradingMode);
   const activeAgents = filteredAgents.filter((a) => a.status === "active");
@@ -160,7 +176,8 @@ export default function HomeScreen() {
 
   // Total current holdings value
   const totalHoldingsValue = holdings.reduce((s, h) => s + h.currentValue, 0);
-  const portfolioValue = 10000 + totalPnL;
+  // Use the balance from the profile (kept up-to-date by the edge function after each trade)
+  const portfolioValue = user?.balance ?? (10000 + totalPnL);
 
   // ─── Cache key ────────────────────────────────────────────────────────────
   const cacheKey = `dashboard_v2_${authUser?.id}`;
@@ -258,6 +275,7 @@ export default function HomeScreen() {
 
   useEffect(() => {
     loadHoldingsAndStats();
+    refreshProfile();
   }, [authUser?.id]);
 
   useEffect(() => {
@@ -283,11 +301,12 @@ export default function HomeScreen() {
         loadTrades(authUser.id),
         loadChartData(timeframe, false),
         loadHoldingsAndStats(),
+        refreshProfile(),
       ]);
     }
     setLastRefreshed(new Date());
     setRefreshing(false);
-  }, [authUser?.id, timeframe, loadChartData, loadAgents, loadTrades, loadHoldingsAndStats]);
+  }, [authUser?.id, timeframe, loadChartData, loadAgents, loadTrades, loadHoldingsAndStats, refreshProfile]);
 
   // Auto-refresh every 60 seconds
   useEffect(() => {
@@ -380,17 +399,20 @@ export default function HomeScreen() {
             </View>
             <Pressable
               onPress={onRefresh}
+              hitSlop={8}
               style={{
                 width: 34, height: 34, borderRadius: 10,
                 backgroundColor: colors.card, borderWidth: 1, borderColor: colors.cardBorder,
                 alignItems: "center", justifyContent: "center",
               }}
             >
-              <Ionicons
-                name={refreshing ? "sync" : "refresh-outline"}
-                size={16}
-                color={refreshing ? Colors.accent : colors.textSecondary}
-              />
+              <Animated.View style={{ transform: [{ rotate: spinDeg }] }}>
+                <Ionicons
+                  name="refresh-outline"
+                  size={16}
+                  color={refreshing ? Colors.accent : colors.textSecondary}
+                />
+              </Animated.View>
             </Pressable>
             <BellButton />
             <Pressable

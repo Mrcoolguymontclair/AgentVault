@@ -48,7 +48,7 @@ function AuthRouter() {
       seg0 === "agent" || seg0 === "trader" ||
       seg0 === "notifications" || seg0 === "subscription" ||
       seg0 === "profile-edit" || seg0 === "alpaca-setup" ||
-      seg0 === "legal" || seg0 === "status";
+      seg0 === "api-keys" || seg0 === "legal" || seg0 === "status";
 
     if (!session) {
       if (!inAuth) router.replace("/auth/login");
@@ -286,6 +286,13 @@ function AppLoader() {
         />
         <Stack.Screen
           name="alpaca-setup"
+          options={{
+            headerShown: false,
+            animation: Platform.OS === "web" ? "none" : "slide_from_right",
+          }}
+        />
+        <Stack.Screen
+          name="api-keys"
           options={{
             headerShown: false,
             animation: Platform.OS === "web" ? "none" : "slide_from_right",

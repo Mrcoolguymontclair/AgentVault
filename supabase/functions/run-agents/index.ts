@@ -424,6 +424,13 @@ async function runAgent(
       { onConflict: "user_id,agent_id,snapshot_date" }
     );
 
+    // ── Update profile balance (10000 + total realized P&L) ───────────────
+    // Fire-and-forget: keeps profiles.balance in sync so the dashboard shows
+    // the correct portfolio value without needing a manual refresh.
+    supabase.rpc("rpc_calculate_portfolio_value", { p_user_id: agent.user_id }).catch((err) => {
+      console.warn("[rpc_calculate_portfolio_value] Non-fatal error:", err);
+    });
+
     const executionResult: ExecutionResult = {
       ...base,
       success: true,
