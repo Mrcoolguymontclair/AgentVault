@@ -106,6 +106,24 @@ export function generateSyntheticPortfolioData(
   return points;
 }
 
+/**
+ * Fetch current / last-known prices for a list of symbols.
+ * Calls the get-current-prices edge function (Alpaca latest trade → last bar close fallback).
+ * Works on weekends — returns Friday close price.
+ */
+export async function fetchCurrentPrices(symbols: string[]): Promise<Record<string, number>> {
+  if (symbols.length === 0) return {};
+  try {
+    const { data, error } = await supabase.functions.invoke("get-current-prices", {
+      body: { symbols },
+    });
+    if (error || !data?.prices) return {};
+    return data.prices as Record<string, number>;
+  } catch {
+    return {};
+  }
+}
+
 /** Fetch SPY daily bars from the get-market-bars edge function. */
 export async function fetchSpyBars(days: number): Promise<{ date: string; close: number }[]> {
   try {

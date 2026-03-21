@@ -31,6 +31,7 @@ import {
   fetchSpyBars,
   buildSpyOverlay,
   fetchAllAgentSnapshots,
+  fetchCurrentPrices,
   getMarketStatus,
   AGENT_CHART_COLORS,
   type ChartPoint,
@@ -40,6 +41,7 @@ import { MultiLineChart } from "@/components/ui/PortfolioChart";
 import {
   fetchPortfolioHoldings,
   fetchPortfolioStats,
+  applyCurrentPrices,
   getCompanyName,
   type Holding,
   type PortfolioStats,
@@ -124,6 +126,7 @@ export default function HomeScreen() {
   const [holdingsLoading, setHoldingsLoading] = useState(true);
   const [stats, setStats] = useState<PortfolioStats | null>(null);
   const [statsLoading, setStatsLoading] = useState(true);
+  const [livePortfolioValue, setLivePortfolioValue] = useState<number | null>(null);
 
   const displayName = authUser?.user_metadata?.display_name ?? "Trader";
   const avatar = authUser?.user_metadata?.avatar ?? "🚀";
@@ -176,8 +179,9 @@ export default function HomeScreen() {
 
   // Total current holdings value
   const totalHoldingsValue = holdings.reduce((s, h) => s + h.currentValue, 0);
-  // Use the balance from the profile (kept up-to-date by the edge function after each trade)
-  const portfolioValue = user?.balance ?? (10000 + totalPnL);
+  // Live value = 10000 + realizedPnL + unrealizedPnL (computed after fetching current prices)
+  // Falls back to profile balance, then to agent-derived estimate
+  const portfolioValue = livePortfolioValue ?? user?.balance ?? (10000 + totalPnL);
 
   // ─── Cache key ────────────────────────────────────────────────────────────
   const cacheKey = `dashboard_v2_${authUser?.id}`;
@@ -241,16 +245,28 @@ export default function HomeScreen() {
     [authUser?.id, totalPnL, cacheKey]
   );
 
-  // ─── Load holdings + stats ────────────────────────────────────────────────
+  // ─── Load holdings + stats + live prices ─────────────────────────────────
   const loadHoldingsAndStats = useCallback(async () => {
     if (!authUser?.id) return;
     setHoldingsLoading(true);
     setStatsLoading(true);
+
     const [h, s] = await Promise.all([
       fetchPortfolioHoldings(authUser.id),
       fetchPortfolioStats(authUser.id),
     ]);
-    setHoldings(h);
+
+    // Fetch live (or last-close) prices for all open positions
+    const openSymbols = h.filter((x) => x.totalQuantity > 0).map((x) => x.symbol);
+    const prices = await fetchCurrentPrices(openSymbols);
+    const updatedHoldings = applyCurrentPrices(h, prices);
+
+    // Portfolio value = starting balance + realized P&L + unrealized P&L
+    const realizedPnl   = s?.totalPnl ?? 0;
+    const unrealizedPnl = updatedHoldings.reduce((sum, x) => sum + x.unrealizedPnl, 0);
+    setLivePortfolioValue(10000 + realizedPnl + unrealizedPnl);
+
+    setHoldings(updatedHoldings);
     setStats(s);
     setHoldingsLoading(false);
     setStatsLoading(false);
@@ -308,11 +324,12 @@ export default function HomeScreen() {
     setRefreshing(false);
   }, [authUser?.id, timeframe, loadChartData, loadAgents, loadTrades, loadHoldingsAndStats, refreshProfile]);
 
-  // Auto-refresh every 60 seconds
+  // Auto-refresh: 30s during market hours, 5 min outside
   useEffect(() => {
-    const timer = setInterval(() => { onRefresh(); }, 60000);
+    const intervalMs = marketStatus.status === "open" ? 30_000 : 5 * 60_000;
+    const timer = setInterval(() => { onRefresh(); }, intervalMs);
     return () => clearInterval(timer);
-  }, [onRefresh]);
+  }, [onRefresh, marketStatus.status]);
 
   // ─── Live trading confirmation ─────────────────────────────────────────
   function handleModeToggle(mode: TradingMode) {
@@ -394,7 +411,13 @@ export default function HomeScreen() {
             >
               <PulsingDot color={mktColor} size={6} />
               <Text style={{ color: mktColor, fontSize: 11, fontWeight: "700" }}>
-                {marketStatus.label}
+                {marketStatus.status === "open"
+                  ? "Live Prices"
+                  : marketStatus.status === "premarket"
+                  ? "Pre-Market"
+                  : marketStatus.status === "afterhours"
+                  ? "After Hours"
+                  : "Closing Prices"}
               </Text>
             </View>
             <Pressable

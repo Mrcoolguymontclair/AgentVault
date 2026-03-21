@@ -108,6 +108,22 @@ export async function fetchPortfolioStats(userId: string): Promise<PortfolioStat
   };
 }
 
+/**
+ * Apply fresh current prices to a holdings array.
+ * Recomputes lastPrice, currentValue, unrealizedPnl, unrealizedPnlPct for each holding.
+ * Holdings for symbols not in `prices` are returned unchanged.
+ */
+export function applyCurrentPrices(holdings: Holding[], prices: Record<string, number>): Holding[] {
+  return holdings.map((h) => {
+    const price = prices[h.symbol];
+    if (!price || price <= 0) return h;
+    const currentValue    = price * h.totalQuantity;
+    const unrealizedPnl   = (price - h.avgCost) * h.totalQuantity;
+    const unrealizedPnlPct = h.avgCost > 0 ? ((price - h.avgCost) / h.avgCost) * 100 : 0;
+    return { ...h, lastPrice: price, currentValue, unrealizedPnl, unrealizedPnlPct };
+  });
+}
+
 export async function fetchAgentHoldings(agentId: string): Promise<AgentHolding[]> {
   const { data, error } = await supabase.rpc("rpc_get_agent_holdings", {
     p_agent_id: agentId,
