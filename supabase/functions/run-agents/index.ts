@@ -171,14 +171,26 @@ async function runAgent(
       return { ...base, skipped: true, skipReason: `Daily loss limit hit ($${Math.abs(dailyPnl).toFixed(2)} — 3% of budget)` };
     }
 
+    // ── Daily trade limit (max 2 trades per agent per day) ────
+    const dailyTradeCount = (todayTrades ?? []).length;
+    if (dailyTradeCount >= 2) {
+      await logExecution(supabase, agent, {
+        action: "skipped",
+        skip_reason: `Daily trade limit reached (${dailyTradeCount}/2 trades today)`,
+      });
+      return { ...base, skipped: true, skipReason: `Daily trade limit reached (${dailyTradeCount}/2 trades today)` };
+    }
+
     // ── Calculate agent's virtual positions from DB ──────────
     const { data: allTrades } = await supabase
       .from("trades")
-      .select("symbol, side, quantity, price")
-      .eq("agent_id", agent.id);
+      .select("symbol, side, quantity, price, executed_at")
+      .eq("agent_id", agent.id)
+      .order("executed_at", { ascending: true });
 
     const agentPositions: Record<string, number> = {}; // symbol → net qty held
     const agentAvgCost: Record<string, number> = {}; // symbol → avg buy price
+    const agentPositionOpenedAt: Record<string, string> = {}; // symbol → when long position was first opened
 
     for (const t of allTrades ?? []) {
       const tradeQty = Number(t.quantity);
@@ -189,6 +201,9 @@ async function runAgent(
         if (prevQty < 0) {
           // Covering a short — move position back toward 0
           agentPositions[sym] = prevQty + tradeQty;
+          if ((agentPositions[sym] ?? 0) >= 0) {
+            delete agentPositionOpenedAt[sym]; // short fully closed
+          }
         } else {
           // Long buy — update avg cost
           const prevAvg = agentAvgCost[sym] ?? 0;
@@ -196,12 +211,19 @@ async function runAgent(
             ? (prevAvg * prevQty + Number(t.price) * tradeQty) / (prevQty + tradeQty)
             : Number(t.price);
           agentPositions[sym] = prevQty + tradeQty;
+          // Record when this long position was first opened
+          if (prevQty === 0 && !agentPositionOpenedAt[sym]) {
+            agentPositionOpenedAt[sym] = t.executed_at;
+          }
         }
       } else {
         // Sell
         if (prevQty > 0) {
           // Closing a long
           agentPositions[sym] = Math.max(0, prevQty - tradeQty);
+          if (agentPositions[sym] === 0) {
+            delete agentPositionOpenedAt[sym]; // position fully closed
+          }
         } else {
           // Opening or adding to a short — track the short entry price
           agentAvgCost[sym] = Number(t.price);
@@ -237,7 +259,7 @@ async function runAgent(
       : config;
 
     // ── Run strategy ─────────────────────────────────────────
-    const signal = await runStrategy(agent.strategy, enrichedConfig, agentPositions, agentAvgCost);
+    const signal = await runStrategy(agent.strategy, enrichedConfig, agentPositions, agentAvgCost, agentPositionOpenedAt);
     if (!signal) {
       await logExecution(supabase, agent, {
         action: "skipped",
@@ -291,7 +313,7 @@ async function runAgent(
     // ── AI confirmation ───────────────────────────────────────
     // Some strategies (News Trader, Blind Quant) already made the Groq decision
     // internally — skip confirmTrade and use their result directly.
-    const aiThreshold = config.aggressive_mode ? 0.30 : 0.45;
+    const aiThreshold = 0.65; // require confident AI; never execute on weak or fallback signals
     let ai: { execute: boolean; reasoning: string; confidence: number };
 
     if (signal.skipAiConfirmation) {
@@ -308,6 +330,22 @@ async function runAgent(
         reason:   signal.reason,
         ...signal.marketData,
       });
+    }
+
+    // If AI is unavailable (fallback), do NOT execute — skip for safety
+    const aiUnavailable = /unavailable|fallback|AI unavailable/i.test(ai.reasoning);
+    if (aiUnavailable) {
+      const skipReason = "AI unavailable — trade skipped for safety";
+      await logExecution(supabase, agent, {
+        action: "skipped",
+        skip_reason: skipReason,
+        signal_detected: true,
+        signal_symbol: signal.symbol,
+        signal_side: signal.side,
+        ai_reasoning: ai.reasoning,
+        ai_confidence: ai.confidence,
+      });
+      return { ...base, skipped: true, skipReason };
     }
 
     if (!ai.execute || ai.confidence < aiThreshold) {
@@ -370,12 +408,22 @@ async function runAgent(
     let tradePnl = 0;
     if (signal.side === "sell" && !isShortEntry) {
       // Closing a long position
-      const avgCost = agentAvgCost[signal.symbol] ?? fillPrice;
-      tradePnl = (fillPrice - avgCost) * qty;
+      const avgCost = agentAvgCost[signal.symbol] ?? 0;
+      if (avgCost > 0) {
+        tradePnl = (fillPrice - avgCost) * qty;
+        console.log(`[pnl] SELL ${signal.symbol}: ($${fillPrice.toFixed(2)} - $${avgCost.toFixed(2)}) × ${qty} = $${tradePnl.toFixed(2)}`);
+      } else {
+        console.warn(`[pnl] SELL ${signal.symbol}: avg cost missing — pnl recorded as $0`);
+      }
     } else if (isShortCover) {
       // Covering a short: profit = (short entry price − cover price) × qty
-      const shortEntryPrice = agentAvgCost[signal.symbol] ?? fillPrice;
-      tradePnl = (shortEntryPrice - fillPrice) * qty;
+      const shortEntryPrice = agentAvgCost[signal.symbol] ?? 0;
+      if (shortEntryPrice > 0) {
+        tradePnl = (shortEntryPrice - fillPrice) * qty;
+        console.log(`[pnl] SHORT COVER ${signal.symbol}: ($${shortEntryPrice.toFixed(2)} - $${fillPrice.toFixed(2)}) × ${qty} = $${tradePnl.toFixed(2)}`);
+      } else {
+        console.warn(`[pnl] SHORT COVER ${signal.symbol}: entry price missing — pnl recorded as $0`);
+      }
     }
     // Short entry (isShortEntry) and long buys: PnL = 0 (realized later)
 

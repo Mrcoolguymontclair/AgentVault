@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from "react";
-import { View, Text, Animated } from "react-native";
+import { View, Text, Animated, Platform } from "react-native";
 import Svg, {
   Path,
   Defs,
@@ -15,7 +15,7 @@ import type { ChartPoint } from "@/lib/services/portfolioService";
 import { Colors } from "@/constants/colors";
 
 const CHART_HEIGHT = 140;
-const PADDING = { top: 8, bottom: 28, left: 0, right: 0 };
+const PADDING = { top: 8, bottom: 28, left: 0, right: 4 };
 
 interface Props {
   data: ChartPoint[];
@@ -143,7 +143,7 @@ export function PortfolioChart({ data, width, isPositive, isDark, loading, spyDa
       toValue: 1,
       duration: 500,
       delay: 80,
-      useNativeDriver: true,
+      useNativeDriver: Platform.OS !== "web",
     }).start();
   }, [dataKey]);
 

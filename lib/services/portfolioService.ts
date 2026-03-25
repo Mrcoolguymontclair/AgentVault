@@ -126,14 +126,16 @@ export async function fetchCurrentPrices(symbols: string[]): Promise<Record<stri
 
 /**
  * Build a portfolio value chart from trade history when no daily snapshots exist.
- * Starts at $10,000 and plots cumulative realized PnL at each trade date,
+ * Starts at `baseValue` (total agent budget) and plots cumulative realized PnL at each trade date,
  * with `currentValue` as the final point (includes unrealized P&L).
  */
 export async function buildChartFromTrades(
   userId: string,
   currentValue: number,
-  days: number
+  days: number,
+  baseValue?: number
 ): Promise<ChartPoint[]> {
+  const base = baseValue ?? currentValue;
   const since = new Date();
   since.setDate(since.getDate() - days);
   const sinceDate = since.toISOString().split("T")[0];
@@ -149,7 +151,7 @@ export async function buildChartFromTrades(
 
   if (rows.length === 0) {
     return [
-      { date: sinceDate, value: 10000 },
+      { date: sinceDate, value: base },
       { date: today, value: currentValue },
     ];
   }
@@ -160,13 +162,13 @@ export async function buildChartFromTrades(
   for (const row of rows) {
     cumPnl += Number(row.pnl ?? 0);
     const date = (row.executed_at as string).split("T")[0];
-    dateToValue[date] = 10000 + cumPnl;
+    dateToValue[date] = base + cumPnl;
   }
 
   const allDates = Object.keys(dateToValue).sort();
   const prevDates = allDates.filter((d) => d < sinceDate);
   const startValue =
-    prevDates.length > 0 ? dateToValue[prevDates[prevDates.length - 1]] : 10000;
+    prevDates.length > 0 ? dateToValue[prevDates[prevDates.length - 1]] : base;
   const windowDates = allDates.filter((d) => d >= sinceDate);
 
   const points: ChartPoint[] = [{ date: sinceDate, value: startValue }];

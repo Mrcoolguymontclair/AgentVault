@@ -93,9 +93,16 @@ export function DeploySheet({ visible, onClose, onDeployed }: Props) {
     const defaults: Record<string, number> = {};
     s.params.forEach((p) => { defaults[p.key] = p.default; });
     setParams(defaults);
-    // Suggest a name
+    // Suggest a unique name (avoid reusing names of existing agents)
     const suggestion = s.nameSuggestions[Math.floor(Math.random() * s.nameSuggestions.length)];
-    setAgentName(suggestion);
+    const existingNames = agents.map((a) => a.name);
+    let finalName = suggestion;
+    if (existingNames.includes(finalName)) {
+      let n = 2;
+      while (existingNames.includes(`${suggestion} ${n}`)) n++;
+      finalName = `${suggestion} ${n}`;
+    }
+    setAgentName(finalName);
     setStep(2);
   }
 
@@ -910,7 +917,7 @@ function StepConfigure({
             Private Agent {!canPrivate && "(Pro)"}
           </Text>
           <Text style={{ color: colors.textSecondary, fontSize: 12, marginTop: 2 }}>
-            {isPrivate ? "Only you can see this agent" : "Visible on leaderboard & social feed"}
+            {isPrivate ? "Hidden from leaderboard & social feed" : "Visible on leaderboard & social feed"}
           </Text>
         </View>
         <View

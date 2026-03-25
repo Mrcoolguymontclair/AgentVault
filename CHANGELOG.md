@@ -4,6 +4,58 @@ All notable changes to this project are documented here. Newest entries at the t
 
 ---
 
+## [2026-03-25] — 27-Bug Audit Fix (Critical → Medium)
+
+### Critical
+- **BUG 9 / BUG 26 — Tab nav & notification listener on web:** `addNotificationResponseReceivedListener` now wrapped in `Platform.OS !== "web"` guard; tab names added to `inTabs` check in AuthRouter so web routing doesn't redirect away from tabs
+- **BUG 3 — All-time P&L always $0:** Fixed: `allTimePnl = portfolioValue - totalBudget` (was incorrectly using `totalPnL` from stale DB agent rows)
+- **BUG 4 — Agent cards show $0 (historical P&L):** New migration `021_fix_historical_pnl.sql` recalculates realized P&L for all sell trades that were zeroed by the old `?? fillPrice` bug, then refreshes agent stats
+
+### High
+- **BUG 5 — Recent activity shows +$0.00 for buys:** Buy trades now show trade cost (gray); sell trades show P&L in green/red — applies to both dashboard activity and agent detail trade history
+- **BUG 7 — Chart Y-axis doesn't match portfolio:** `buildChartFromTrades` now accepts `baseValue` (total agent budget) instead of hardcoded $10,000; chart starts at actual investment amount
+- **BUG 8 — Trade history P&L shows "—" for buys:** Agent detail TradeRow now shows cost paid for buys, P&L for sells, with separate "Cost" / "P&L" labels
+- **BUG 10 — Timeframe buttons don't refresh chart:** Fixed `useEffect([timeframe])` to use `fromCache=false` so switching timeframes always fetches fresh data
+- **BUG 11 — Leaderboard empty with ≤3 public agents:** FlatList now shows `filteredEntries` when podium isn't full (was showing empty `rest` array)
+
+### Medium
+- **BUG 13 — Privacy mode incomplete:** Eye icon now masks all financial values: all-time P&L badge, Today's P&L quick stat, holdings subtitle, and activity trade amounts
+- **BUG 14 — Win rate shows "—" for 0%:** Now shows "0.0%" when trades exist but none won; "—" only when no trades at all
+- **BUG 16 — X-axis date truncated:** Added 4px right padding to PortfolioChart; also fixed `useNativeDriver: true` crash on web in chart animation
+- **BUG 17 — Allocation bar breaks for short positions:** `totalHoldingsValue` and allocation percentages now use `Math.abs(currentValue)` so short positions display correctly
+
+### Low / Console
+- **BUG 19 — Homepage shows only 3 of 5 agents:** Removed `.slice(0, 3)` — all agents now shown
+- **BUG 23 — Deploy name always "Surge Bot":** Names are now deduplicated against existing agents: adds " 2", " 3" suffix if name already taken
+- **BUG 24 — Private agent label contradictory:** Description now correctly says "Hidden from leaderboard & social feed" when private (not "Visible on leaderboard")
+- **BUG 25 — useNativeDriver warning on web:** Spin animation and PortfolioChart animation both use `Platform.OS !== "web"` for `useNativeDriver`
+- **BUG 27 — console.log of Supabase URL in production:** Removed from `lib/supabase.ts`
+
+### New Migrations
+- `021_fix_historical_pnl.sql` — run in Supabase SQL Editor to recalculate historical trade P&L and refresh agent stats
+
+---
+
+## [2026-03-23] — Fundamental Strategy Fixes (7 Problems)
+- **FIX 1 — Quality filter:** All strategies now reject stocks below $15 price OR below 500k avg daily volume BEFORE any signal logic runs. Killed penny stock buys (MGRX, UGRO, etc.)
+- **FIX 2 — Stop loss simplified:** Fixed stop-loss is now 8% below ENTRY price (not 20-day high), only activates after 2 hours of holding. No more false triggers on normal intraday volatility.
+- **FIX 3 — P&L calculation fixed:** Long sells now correctly compute `(sell_price - avg_buy_price) × qty`. Short covers compute `(short_entry - cover_price) × qty`. Removed wrong `?? fillPrice` fallback that was zeroing all P&L.
+- **FIX 4 — AI gate tightened:** Confidence threshold raised from 0.45 → 0.65. If Groq is unavailable (fallback response), trade is SKIPPED — never execute blind.
+- **FIX 5 — Daily trade cap:** Maximum 2 trades per agent per day. After 2 executions, agent skips until tomorrow.
+- **FIX 6 — News Trader is pure news:** Removed all stop-loss and technical indicator logic from News Trader. It ONLY analyzes headlines → Groq sentiment → trade or skip.
+- **FIX 7 — Blind Quant market regime:** SPY daily change now gates Blind Quant. If SPY < -1.5%, new longs blocked. If SPY > +1.5%, new shorts blocked. Covers/closes still allowed.
+- No new migrations needed
+
+## [2026-03-23] — Trailing Stop Overhaul (Less Aggressive)
+- **Fixed:** Trailing stop now triggers 5% below ENTRY PRICE, not 3% below 20-day high — the old logic triggered on normal intraday swing, not real losses
+- **Fixed:** Trailing stop now enforces a minimum hold time: 1 hour (4 cron cycles) for all equity strategies before checking stops — gives positions room to breathe
+- **Fixed:** Smart DCA trailing stop is 10% below entry, checked only after 24 hours — appropriate for long-term ETF positions
+- **Improved:** Trailing stop logs now clearly show: symbol, hold time, entry price, current price, stop price, and SAFE/TRIGGERED/TOO EARLY status
+- **Improved:** Trades query now ordered by `executed_at ASC` to correctly track when each position was first opened
+- No new migrations needed
+
+---
+
 ## [2026-03-21] — Per-Agent Budgets + Paper/Live Architecture
 - **BREAKING:** Removed global $10,000 starting balance. Each agent now has its own independent budget.
 - Added Paper vs Live mode per agent (chosen at deploy time)

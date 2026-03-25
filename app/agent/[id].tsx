@@ -820,7 +820,7 @@ export default function AgentDetailScreen() {
                     </Text>
                     <Text style={{ color: colors.textTertiary, fontSize: 12, marginTop: 1 }}>
                       {isPro
-                        ? (isPrivate ? "Only you can see this agent" : "Visible on leaderboard and social")
+                        ? (isPrivate ? "Hidden from leaderboard & social feed" : "Visible on leaderboard & social feed")
                         : "Upgrade to Pro to make agents public"}
                     </Text>
                   </View>
@@ -1756,13 +1756,19 @@ function TradeRow({ trade, colors }: { trade: DbTrade; colors: any }) {
       <View style={{ alignItems: "flex-end", gap: 2 }}>
         <Text
           style={{
-            color: isProfit ? Colors.success : pnl === 0 ? colors.textSecondary : Colors.danger,
+            color: isBuy
+              ? colors.textSecondary
+              : isProfit ? Colors.success : Colors.danger,
             fontWeight: "700", fontSize: 14,
           }}
         >
-          {pnl === 0 ? "—" : formatCurrency(pnl, true)}
+          {isBuy
+            ? formatCurrency(Number(trade.quantity) * Number(trade.price))
+            : pnl !== 0 ? `${pnl >= 0 ? "+" : ""}${formatCurrency(pnl, true)}` : "—"}
         </Text>
-        <Text style={{ color: colors.textTertiary, fontSize: 11 }}>P&L</Text>
+        <Text style={{ color: colors.textTertiary, fontSize: 11 }}>
+          {isBuy ? "Cost" : "P&L"}
+        </Text>
       </View>
     </View>
   );

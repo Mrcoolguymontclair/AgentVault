@@ -19,8 +19,6 @@ import {
   calculateBollingerBands,
   calculateVolumeMA,
   smaSlope,
-  periodLow,
-  periodHigh,
 } from "./market-utils.ts";
 import type { TradeSignal, BarData } from "./types.ts";
 
@@ -72,48 +70,75 @@ function heldSymbols(positions: Record<string, number>): string[] {
 }
 
 /**
- * Shared trailing-stop checker.
- * Fires when a held position has been profitable (20d-high > avgCost × 1.01)
- * AND the current price has dropped ≥ stopPct from that 20d-high.
+ * Quality filter: reject penny stocks and illiquid names before any strategy logic.
+ * Requires price >= $15 AND average daily volume >= 500,000 shares.
+ */
+function isQualityStock(bars: BarData[]): boolean {
+  if (bars.length < 5) return false;
+  const currentPrice = bars[bars.length - 1].c;
+  if (currentPrice < 15) return false;
+  const lookback = Math.min(20, bars.length);
+  const avgVolume = bars.slice(-lookback).reduce((sum, b) => sum + b.v, 0) / lookback;
+  return avgVolume >= 500_000;
+}
+
+/**
+ * Fixed stop-loss checker.
+ * Sells a held position if it has dropped ≥ stopPct below the ENTRY price (avgCost).
+ * Only activates after minHoldMs to avoid firing on normal post-entry noise.
  * Returns a sell signal for the FIRST qualifying symbol, or null.
  */
 async function checkTrailingStops(
   agentPositions: Record<string, number>,
   agentAvgCost: Record<string, number>,
-  stopPct = 0.03,
+  agentPositionOpenedAt: Record<string, string> = {},
+  stopPct = 0.08,          // 8% below entry price
+  minHoldMs = 7_200_000,   // 2 hours minimum hold before stop is active
 ): Promise<TradeSignal | null> {
+  const now = Date.now();
+
   for (const symbol of Object.keys(agentPositions)) {
     const heldQty = agentPositions[symbol] ?? 0;
     if (heldQty <= 0) continue;
     const avgCost = agentAvgCost[symbol] ?? 0;
     if (avgCost <= 0) continue;
 
-    const bars = await getDailyBars(symbol, 25);
-    if (bars.length < 5) continue;
-    const closes = bars.map((b) => b.c);
-    const currentPrice = closes[closes.length - 1];
-    const window = Math.min(20, closes.length);
-    const high20 = periodHigh(closes.slice(-window), window);
+    const openedAtStr = agentPositionOpenedAt[symbol];
+    const holdMs = openedAtStr ? now - new Date(openedAtStr).getTime() : Infinity;
+    const holdHrsStr = isFinite(holdMs) ? `${(holdMs / 3_600_000).toFixed(1)}hrs` : "unknown";
+    const stopPrice = avgCost * (1 - stopPct);
 
-    // Only trigger if the position was profitable at some point
-    const wasProfitable = high20 > avgCost * 1.01;
-    const dropFromPeak = high20 > 0 ? (high20 - currentPrice) / high20 : 0;
-
-    if (wasProfitable && dropFromPeak >= stopPct) {
+    // Don't check trailing stop until position has been held long enough
+    if (holdMs < minHoldMs) {
       console.log(
-        `[trailingStop] ${symbol}: $${currentPrice.toFixed(2)} dropped ${(dropFromPeak * 100).toFixed(1)}% from 20d-high $${high20.toFixed(2)} (avgCost $${avgCost.toFixed(2)})`,
+        `[stopLoss] ${symbol}: held ${holdHrsStr}, entry=$${avgCost.toFixed(2)}, stop=$${stopPrice.toFixed(2)} (${(stopPct * 100).toFixed(0)}% below entry) → TOO EARLY (min ${(minHoldMs / 3_600_000).toFixed(0)}hr)`,
+      );
+      continue;
+    }
+
+    const bars = await getDailyBars(symbol, 2);
+    if (bars.length === 0) continue;
+    const currentPrice = bars[bars.length - 1].c;
+
+    if (currentPrice <= stopPrice) {
+      console.log(
+        `[stopLoss] ${symbol}: held ${holdHrsStr}, entry=$${avgCost.toFixed(2)}, current=$${currentPrice.toFixed(2)}, stop=$${stopPrice.toFixed(2)} (${(stopPct * 100).toFixed(0)}% below entry) → TRIGGERED`,
       );
       return {
         symbol,
         side: "sell",
         notional: heldQty * currentPrice,
         reason:
-          `Trailing stop: $${currentPrice.toFixed(2)} is ${(dropFromPeak * 100).toFixed(1)}% ` +
-          `below 20d-high $${high20.toFixed(2)} (avg cost $${avgCost.toFixed(2)})`,
+          `Fixed stop-loss: $${currentPrice.toFixed(2)} hit stop $${stopPrice.toFixed(2)} ` +
+          `(${(stopPct * 100).toFixed(0)}% below entry $${avgCost.toFixed(2)}, held ${holdHrsStr})`,
         strategyConfidence: 0.90,
         marketData: { currentPrice },
       };
     }
+
+    console.log(
+      `[stopLoss] ${symbol}: held ${holdHrsStr}, entry=$${avgCost.toFixed(2)}, current=$${currentPrice.toFixed(2)}, stop=$${stopPrice.toFixed(2)} (${(stopPct * 100).toFixed(0)}% below entry) → SAFE`,
+    );
   }
   return null;
 }
@@ -128,10 +153,11 @@ export async function momentumRider(
   config: Record<string, any>,
   agentPositions: Record<string, number>,
   agentAvgCost: Record<string, number> = {},
+  agentPositionOpenedAt: Record<string, string> = {},
 ): Promise<TradeSignal | null> {
   _lastStrategyDiagnostics = "[TrendRider] fetching most-actives universe...";
 
-  const stopSignal = await checkTrailingStops(agentPositions, agentAvgCost);
+  const stopSignal = await checkTrailingStops(agentPositions, agentAvgCost, agentPositionOpenedAt);
   if (stopSignal) return stopSignal;
 
   let universe = await getMostActives(20);
@@ -155,15 +181,15 @@ export async function momentumRider(
       continue;
     }
 
+    // Quality filter: price >= $15, avg daily volume >= 500k
+    if (!isQualityStock(bars)) {
+      diagLines.push(`${symbol}:low_quality_$${bars[bars.length - 1].c.toFixed(2)}`);
+      continue;
+    }
+
     const closes = bars.map((b) => b.c);
     const volumes = bars.map((b) => b.v);
     const currentPrice = closes[closes.length - 1];
-
-    // Skip very cheap stocks
-    if (currentPrice < 5) {
-      diagLines.push(`${symbol}:price_$${currentPrice.toFixed(2)}_<$5`);
-      continue;
-    }
 
     const sma = calculateSMA(closes.slice(-lookback));
     const avgVol = calculateVolumeMA(volumes.slice(0, -1), volPeriod);
@@ -272,10 +298,11 @@ export async function meanReversion(
   config: Record<string, any>,
   agentPositions: Record<string, number>,
   agentAvgCost: Record<string, number> = {},
+  agentPositionOpenedAt: Record<string, string> = {},
 ): Promise<TradeSignal | null> {
   _lastStrategyDiagnostics = "[BargainHunter] fetching top-losers universe...";
 
-  const stopSignal = await checkTrailingStops(agentPositions, agentAvgCost);
+  const stopSignal = await checkTrailingStops(agentPositions, agentAvgCost, agentPositionOpenedAt);
   if (stopSignal) return stopSignal;
 
   let universe = await getTopLosers(20);
@@ -300,14 +327,14 @@ export async function meanReversion(
       continue;
     }
 
-    const closes = bars.map((b) => b.c);
-    const currentPrice = closes[closes.length - 1];
-
-    // Skip very cheap stocks (likely distressed / de-listed)
-    if (currentPrice < 3) {
-      diagLines.push(`${symbol}:price_$${currentPrice.toFixed(2)}_<$3`);
+    // Quality filter: price >= $15, avg daily volume >= 500k
+    if (!isQualityStock(bars)) {
+      diagLines.push(`${symbol}:low_quality_$${bars[bars.length - 1].c.toFixed(2)}`);
       continue;
     }
+
+    const closes = bars.map((b) => b.c);
+    const currentPrice = closes[closes.length - 1];
 
     const rsi = calculateRSI(closes, rsiPeriod);
     const bb = calculateBollingerBands(closes, 20, 2);
@@ -421,11 +448,12 @@ export async function newsTrader(
   config: Record<string, any>,
   agentPositions: Record<string, number>,
   agentAvgCost: Record<string, number> = {},
+  agentPositionOpenedAt: Record<string, string> = {},
 ): Promise<TradeSignal | null> {
   _lastStrategyDiagnostics = "[NewsTrader] fetching global news stream...";
 
-  const stopSignal = await checkTrailingStops(agentPositions, agentAvgCost);
-  if (stopSignal) return stopSignal;
+  // News Trader is PURE SENTIMENT — no stop losses, no technical filters.
+  // Only input: headlines → Groq sentiment → trade or skip.
 
   // Default threshold: 0.3 (moderate sentiment triggers a trade).
   // config.sentiment_threshold is stored as integer tenths (e.g. 3 → 0.3, 6 → 0.6).
@@ -556,10 +584,11 @@ export async function blindQuant(
   config: Record<string, any>,
   agentPositions: Record<string, number>,
   agentAvgCost: Record<string, number> = {},
+  agentPositionOpenedAt: Record<string, string> = {},
 ): Promise<TradeSignal | null> {
   _lastStrategyDiagnostics = "[BlindQuant] fetching most-actives universe...";
 
-  const stopSignal = await checkTrailingStops(agentPositions, agentAvgCost);
+  const stopSignal = await checkTrailingStops(agentPositions, agentAvgCost, agentPositionOpenedAt);
   if (stopSignal) return stopSignal;
 
   let universe = await getMostActives(15);
@@ -579,6 +608,9 @@ export async function blindQuant(
   for (const symbol of universe) {
     const bars = await getDailyBars(symbol, 30);
     if (bars.length < 22) continue;
+
+    // Quality filter: only anonymize liquid, mid/large-cap stocks
+    if (!isQualityStock(bars)) continue;
 
     const closes = bars.map((b) => b.c);
     const volumes = bars.map((b) => b.v);
@@ -662,6 +694,25 @@ export async function blindQuant(
   if (!symbol) return null;
 
   const heldQty = agentPositions[symbol] ?? 0;
+
+  // ── SPY market regime filter (only for NEW positions) ───────────────────
+  // Bear market (SPY -1.5%+): block new longs. Bull market (SPY +1.5%+): block new shorts.
+  const spyBars = await getDailyBars("SPY", 3);
+  const spyChange = spyBars.length >= 2
+    ? ((spyBars[spyBars.length - 1].c - spyBars[spyBars.length - 2].c) / spyBars[spyBars.length - 2].c) * 100
+    : 0;
+  if (spyChange < -1.5 && decision.side === "buy" && heldQty === 0) {
+    _lastStrategyDiagnostics += ` | bear market (SPY ${spyChange.toFixed(1)}%) — new long blocked`;
+    console.log(`[blindQuant] ${_lastStrategyDiagnostics}`);
+    return null;
+  }
+  if (spyChange > 1.5 && decision.side === "sell" && heldQty === 0) {
+    _lastStrategyDiagnostics += ` | bull market (SPY ${spyChange.toFixed(1)}%) — new short blocked`;
+    console.log(`[blindQuant] ${_lastStrategyDiagnostics}`);
+    return null;
+  }
+  _lastStrategyDiagnostics += ` | SPY ${spyChange.toFixed(1)}%`;
+
   const bars = await getDailyBars(symbol, 2);
   if (bars.length === 0) return null;
   const currentPrice = bars[bars.length - 1].c;
@@ -739,12 +790,13 @@ export async function dcaPlus(
   config: Record<string, any>,
   agentPositions: Record<string, number>,
   agentAvgCost: Record<string, number> = {},
+  agentPositionOpenedAt: Record<string, string> = {},
 ): Promise<TradeSignal | null> {
   _lastStrategyDiagnostics = `[SmartDCA] universe=${DCA_SYMBOLS.join(",")}`;
   console.log(`[dcaPlus] ${_lastStrategyDiagnostics}`);
 
-  // 5% trailing stop for ETFs (wider than equity strategies)
-  const stopSignal = await checkTrailingStops(agentPositions, agentAvgCost, 0.05);
+  // 10% trailing stop for ETFs, only after 24 hours (long-term DCA positions need room)
+  const stopSignal = await checkTrailingStops(agentPositions, agentAvgCost, agentPositionOpenedAt, 0.10, 86_400_000);
   if (stopSignal) return stopSignal;
 
   const baseAmount = Number(config.base_amount ?? 100);
@@ -842,10 +894,11 @@ export async function predictionArb(
   config: Record<string, any>,
   agentPositions: Record<string, number>,
   agentAvgCost: Record<string, number> = {},
+  agentPositionOpenedAt: Record<string, string> = {},
 ): Promise<TradeSignal | null> {
   _lastStrategyDiagnostics = "[PredictionPro] fetching most-actives + news...";
 
-  const stopSignal = await checkTrailingStops(agentPositions, agentAvgCost);
+  const stopSignal = await checkTrailingStops(agentPositions, agentAvgCost, agentPositionOpenedAt);
   if (stopSignal) return stopSignal;
 
   let universe = await getMostActives(10);
@@ -874,6 +927,9 @@ export async function predictionArb(
   for (const symbol of sample) {
     const bars = await getDailyBars(symbol, 25);
     if (bars.length < 10) continue;
+
+    // Quality filter: price >= $15, avg daily volume >= 500k
+    if (!isQualityStock(bars)) continue;
 
     const closes = bars.map((b) => b.c);
     const currentPrice = closes[closes.length - 1];
@@ -969,6 +1025,7 @@ export async function customStrategy(
   config: Record<string, any>,
   agentPositions: Record<string, number>,
   agentAvgCost: Record<string, number> = {},
+  agentPositionOpenedAt: Record<string, string> = {},
 ): Promise<TradeSignal | null> {
   const strategyPrompt = (config.strategy_prompt as string | undefined)?.trim().slice(0, 500);
   if (!strategyPrompt || strategyPrompt.length < 10) {
@@ -979,7 +1036,7 @@ export async function customStrategy(
 
   _lastStrategyDiagnostics = "[YourRules] fetching most-actives universe...";
 
-  const stopSignal = await checkTrailingStops(agentPositions, agentAvgCost);
+  const stopSignal = await checkTrailingStops(agentPositions, agentAvgCost, agentPositionOpenedAt);
   if (stopSignal) return stopSignal;
 
   let universe = await getMostActives(10);
@@ -1000,6 +1057,8 @@ export async function customStrategy(
     try {
       const bars = await getDailyBars(symbol, 25);
       if (bars.length < 20) continue;
+      // Quality filter: price >= $15, avg daily volume >= 500k
+      if (!isQualityStock(bars)) continue;
       const closes = bars.map((b) => b.c);
       const currentPrice = closes[closes.length - 1];
       const prevClose = closes[closes.length - 2];
@@ -1118,7 +1177,8 @@ function isStrategyLabTime(): boolean {
 async function strategyLab(
   config: Record<string, any>,
   agentPositions: Record<string, number>,
-  agentAvgCost: Record<string, number>
+  agentAvgCost: Record<string, number>,
+  agentPositionOpenedAt: Record<string, string> = {},
 ): Promise<TradeSignal | null> {
   // Strategy Lab only runs once per day at market close
   if (!isStrategyLabTime()) {
@@ -1147,7 +1207,8 @@ async function strategyLab(
   return customStrategy(
     { ...config, strategy_prompt: bestRules },
     agentPositions,
-    agentAvgCost
+    agentAvgCost,
+    agentPositionOpenedAt,
   );
 }
 
@@ -1160,24 +1221,25 @@ export async function runStrategy(
   config: Record<string, any>,
   agentPositions: Record<string, number>,
   agentAvgCost: Record<string, number> = {},
+  agentPositionOpenedAt: Record<string, string> = {},
 ): Promise<TradeSignal | null> {
   switch (strategyId) {
     case "momentum_rider":
-      return momentumRider(config, agentPositions, agentAvgCost);
+      return momentumRider(config, agentPositions, agentAvgCost, agentPositionOpenedAt);
     case "mean_reversion":
-      return meanReversion(config, agentPositions, agentAvgCost);
+      return meanReversion(config, agentPositions, agentAvgCost, agentPositionOpenedAt);
     case "prediction_arb":
-      return predictionArb(config, agentPositions, agentAvgCost);
+      return predictionArb(config, agentPositions, agentAvgCost, agentPositionOpenedAt);
     case "dca_plus":
-      return dcaPlus(config, agentPositions, agentAvgCost);
+      return dcaPlus(config, agentPositions, agentAvgCost, agentPositionOpenedAt);
     case "custom":
-      return customStrategy(config, agentPositions, agentAvgCost);
+      return customStrategy(config, agentPositions, agentAvgCost, agentPositionOpenedAt);
     case "news_trader":
-      return newsTrader(config, agentPositions, agentAvgCost);
+      return newsTrader(config, agentPositions, agentAvgCost, agentPositionOpenedAt);
     case "blind_quant":
-      return blindQuant(config, agentPositions, agentAvgCost);
+      return blindQuant(config, agentPositions, agentAvgCost, agentPositionOpenedAt);
     case "strategy_lab":
-      return strategyLab(config, agentPositions, agentAvgCost);
+      return strategyLab(config, agentPositions, agentAvgCost, agentPositionOpenedAt);
     default:
       console.warn(`[runStrategy] Unknown strategy: ${strategyId}`);
       return null;

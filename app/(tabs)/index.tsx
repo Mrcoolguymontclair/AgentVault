@@ -149,7 +149,7 @@ export default function HomeScreen() {
     if (refreshing) {
       spinAnim.setValue(0);
       Animated.loop(
-        Animated.timing(spinAnim, { toValue: 1, duration: 700, useNativeDriver: true })
+        Animated.timing(spinAnim, { toValue: 1, duration: 700, useNativeDriver: Platform.OS !== "web" })
       ).start();
     } else {
       spinAnim.setValue(0);
@@ -178,8 +178,8 @@ export default function HomeScreen() {
 
   const todayPnL = todayTrades.reduce((s, t) => s + t.pnl, 0);
 
-  // Total current holdings value
-  const totalHoldingsValue = holdings.reduce((s, h) => s + h.currentValue, 0);
+  // Total current holdings value (use absolute values so shorts don't reduce total)
+  const totalHoldingsValue = holdings.reduce((s, h) => s + Math.abs(h.currentValue), 0);
   // Per-agent budget model: portfolio value = SUM(agent budgets) + SUM(agent P&L)
   const totalBudget = filteredAgents.reduce((s, a) => s + a.budget, 0);
   // Live value = totalBudget + realizedPnL + unrealizedPnL (computed after fetching current prices)
@@ -225,7 +225,7 @@ export default function HomeScreen() {
 
       if (!hasRealData && authUser?.id) {
         const days = tf === "1W" ? 7 : tf === "1M" ? 30 : tf === "3M" ? 90 : 365;
-        data = await buildChartFromTrades(authUser.id, portfolioValueRef.current, days);
+        data = await buildChartFromTrades(authUser.id, portfolioValueRef.current, days, totalBudget);
       }
 
       setChartData(data);
@@ -292,7 +292,7 @@ export default function HomeScreen() {
 
   // ─── Init ─────────────────────────────────────────────────────────────────
   useEffect(() => {
-    loadChartData(timeframe, true);
+    loadChartData(timeframe, false);
   }, [timeframe]);
 
   useEffect(() => {
@@ -362,6 +362,9 @@ export default function HomeScreen() {
     setTradingMode("live");
     setShowLiveModal(false);
   }
+
+  // ─── Privacy mask helper ──────────────────────────────────────────────
+  const mask = (val: string) => (balanceVisible ? val : "••••");
 
   // ─── Market status colors ─────────────────────────────────────────────
   const mktColor =
@@ -593,7 +596,7 @@ export default function HomeScreen() {
                 )}
 
                 {(() => {
-                  const allTimePnl = totalPnL;
+                  const allTimePnl = portfolioValue - totalBudget;
                   const allTimePct = totalBudget > 0 ? (allTimePnl / totalBudget) * 100 : 0;
                   const up = allTimePnl >= 0;
                   return (
@@ -615,7 +618,9 @@ export default function HomeScreen() {
                           color={up ? Colors.success : Colors.danger}
                         />
                         <Text style={{ color: up ? Colors.success : Colors.danger, fontSize: 12, fontWeight: "700" }}>
-                          {up ? "+" : ""}{formatCurrency(allTimePnl, true)} ({up ? "+" : ""}{allTimePct.toFixed(2)}%) all time
+                          {balanceVisible
+                            ? `${up ? "+" : ""}${formatCurrency(allTimePnl, true)} (${up ? "+" : ""}${allTimePct.toFixed(2)}%) all time`
+                            : "•••• all time"}
                         </Text>
                       </View>
                     </View>
@@ -730,15 +735,19 @@ export default function HomeScreen() {
             <QuickStatCard
               label="Today's P&L"
               value={
-                <AnimatedNumber
-                  value={todayPnL}
-                  formatter={(v) => formatCurrency(v, true)}
-                  style={{
-                    color: todayPnL >= 0 ? Colors.success : Colors.danger,
-                    fontSize: 18,
-                    fontWeight: "800",
-                  }}
-                />
+                balanceVisible ? (
+                  <AnimatedNumber
+                    value={todayPnL}
+                    formatter={(v) => formatCurrency(v, true)}
+                    style={{
+                      color: todayPnL >= 0 ? Colors.success : Colors.danger,
+                      fontSize: 18,
+                      fontWeight: "800",
+                    }}
+                  />
+                ) : (
+                  <Text style={{ color: colors.textSecondary, fontSize: 18, fontWeight: "800" }}>••••</Text>
+                )
               }
               icon="trending-up-outline"
               iconColor={todayPnL >= 0 ? Colors.success : Colors.danger}
@@ -767,7 +776,7 @@ export default function HomeScreen() {
                     fontWeight: "800",
                   }}
                 >
-                  {avgWinRate > 0 ? `${avgWinRate.toFixed(1)}%` : "—"}
+                  {totalTrades > 0 ? `${avgWinRate.toFixed(1)}%` : "—"}
                 </Text>
               }
               icon="trophy-outline"
@@ -784,7 +793,7 @@ export default function HomeScreen() {
               holdingsLoading
                 ? "Loading…"
                 : holdings.length > 0
-                ? `${holdings.length} position${holdings.length !== 1 ? "s" : ""} · ${formatCurrency(totalHoldingsValue)}`
+                ? `${holdings.length} position${holdings.length !== 1 ? "s" : ""} · ${mask(formatCurrency(totalHoldingsValue))}`
                 : undefined
             }
             colors={colors}
@@ -906,7 +915,7 @@ export default function HomeScreen() {
           {filteredAgents.length === 0 ? (
             <EmptyAgentsCard tradingMode={tradingMode} colors={colors} isDark={isDark} />
           ) : (
-            filteredAgents.slice(0, 3).map((agent) => (
+            filteredAgents.map((agent) => (
               <AgentCard
                 key={agent.id}
                 agent={agent}
@@ -966,7 +975,9 @@ export default function HomeScreen() {
                         width: 38,
                         height: 38,
                         borderRadius: 11,
-                        backgroundColor: trade.pnl >= 0 ? Colors.successBg : Colors.dangerBg,
+                        backgroundColor: trade.side === "buy"
+                          ? Colors.accentBg
+                          : trade.pnl >= 0 ? Colors.successBg : Colors.dangerBg,
                         alignItems: "center",
                         justifyContent: "center",
                       }}
@@ -974,7 +985,9 @@ export default function HomeScreen() {
                       <Ionicons
                         name={trade.side === "buy" ? "trending-up-outline" : "trending-down-outline"}
                         size={17}
-                        color={trade.pnl >= 0 ? Colors.success : Colors.danger}
+                        color={trade.side === "buy"
+                          ? Colors.accentLight
+                          : trade.pnl >= 0 ? Colors.success : Colors.danger}
                       />
                     </View>
                     <View style={{ flex: 1, gap: 2 }}>
@@ -989,12 +1002,18 @@ export default function HomeScreen() {
                     <View style={{ alignItems: "flex-end", gap: 3 }}>
                       <Text
                         style={{
-                          color: trade.pnl >= 0 ? Colors.success : Colors.danger,
+                          color: trade.side === "sell" && trade.pnl !== 0
+                            ? trade.pnl >= 0 ? Colors.success : Colors.danger
+                            : colors.textSecondary,
                           fontWeight: "700",
                           fontSize: 14,
                         }}
                       >
-                        {trade.pnl >= 0 ? "+" : ""}{formatCurrency(trade.pnl)}
+                        {balanceVisible
+                          ? trade.side === "sell" && trade.pnl !== 0
+                            ? `${trade.pnl >= 0 ? "+" : ""}${formatCurrency(trade.pnl)}`
+                            : formatCurrency(trade.quantity * trade.price)
+                          : "••••"}
                       </Text>
                       <Text style={{ color: colors.textTertiary, fontSize: 11 }}>
                         {timeAgo(trade.executedAt)}
@@ -1209,7 +1228,7 @@ function AllocationBar({ holdings, totalValue, colors }: {
       {/* Segmented bar */}
       <View style={{ flexDirection: "row", height: 8, borderRadius: 8, overflow: "hidden", gap: 1 }}>
         {top.map((h, i) => {
-          const pct = (h.currentValue / totalValue) * 100;
+          const pct = totalValue > 0 ? (Math.abs(h.currentValue) / totalValue) * 100 : 0;
           return (
             <View
               key={h.symbol}
@@ -1226,7 +1245,7 @@ function AllocationBar({ holdings, totalValue, colors }: {
       {/* Legend */}
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10 }}>
         {top.map((h, i) => {
-          const pct = (h.currentValue / totalValue) * 100;
+          const pct = totalValue > 0 ? (Math.abs(h.currentValue) / totalValue) * 100 : 0;
           return (
             <View key={h.symbol} style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
               <View

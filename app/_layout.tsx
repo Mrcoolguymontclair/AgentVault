@@ -41,7 +41,11 @@ function AuthRouter() {
     const inAuth = seg0 === "auth";
     const inSetup = seg0 === "profile-setup";
     const inOnboarding = seg0 === "onboarding";
-    const inTabs = seg0 === "(tabs)";
+    // On web, expo-router may return bare tab names instead of "(tabs)"
+    const inTabs = seg0 === "(tabs)" ||
+      seg0 === "index" || seg0 === "agents" ||
+      seg0 === "leaderboard" || seg0 === "social" ||
+      seg0 === "settings" || seg0 === "debug";
     // Deep routes (agent detail, trader profile) — don't touch these
     // "status" is a public page — never redirect it to login
     const inDeepRoute =
@@ -120,8 +124,9 @@ function NotificationManager() {
     };
   }, [session?.user?.id]);
 
-  // Handle notification taps (navigates to agent detail)
+  // Handle notification taps (navigates to agent detail) — native only
   useEffect(() => {
+    if (Platform.OS === "web") return;
     const subscription = Notifications.addNotificationResponseReceivedListener(
       (response) => {
         const data = response.notification.request.content.data as Record<string, string>;

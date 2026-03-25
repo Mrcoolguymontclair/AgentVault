@@ -439,7 +439,7 @@ export default function LeaderboardScreen() {
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }} edges={["top"]}>
       <FlatList
-        data={searchQuery ? filteredEntries : rest}
+        data={searchQuery ? filteredEntries : top3.length === 3 ? rest : filteredEntries}
         keyExtractor={(item) => item.id}
         renderItem={renderItem}
         ListHeaderComponent={ListHeader}
