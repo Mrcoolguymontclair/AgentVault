@@ -47,6 +47,7 @@ import {
   type Holding,
   type PortfolioStats,
 } from "@/lib/services/holdingsService";
+import { supabase } from "@/lib/supabase";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 type TradingMode = "paper" | "live";
@@ -128,6 +129,12 @@ export default function HomeScreen() {
   const [stats, setStats] = useState<PortfolioStats | null>(null);
   const [statsLoading, setStatsLoading] = useState(true);
   const [livePortfolioValue, setLivePortfolioValue] = useState<number | null>(null);
+  // Bug 2: per-agent { realized + unrealized } P&L
+  const [agentBlendedPnl, setAgentBlendedPnl] = useState<Record<string, { pnl: number; pnlPct: number }>>({});
+  // Bug 17: per-agent max drawdown
+  const [agentMaxDD, setAgentMaxDD] = useState<Record<string, number>>({});
+  // Bug 16: per-agent daily cumulative P&L history for sparklines
+  const [agentPnlHistory, setAgentPnlHistory] = useState<Record<string, number[]>>({});
 
   const displayName = authUser?.user_metadata?.display_name ?? "Trader";
   const avatar = authUser?.user_metadata?.avatar ?? "🚀";
@@ -253,9 +260,15 @@ export default function HomeScreen() {
     setHoldingsLoading(true);
     setStatsLoading(true);
 
-    const [h, s] = await Promise.all([
+    const [h, s, agentSummaryRes, agentDDRes, agentHistRes] = await Promise.all([
       fetchPortfolioHoldings(authUser.id),
       fetchPortfolioStats(authUser.id),
+      // Bug 2: per-agent open positions for unrealized P&L blend
+      supabase.rpc("rpc_get_agent_pnl_summary", { p_user_id: authUser.id }),
+      // Bug 17: per-agent max drawdown
+      supabase.rpc("rpc_get_agent_max_drawdowns", { p_user_id: authUser.id }),
+      // Bug 16: per-agent daily P&L for sparklines
+      supabase.rpc("rpc_get_agent_pnl_history", { p_user_id: authUser.id, p_days: 30 }),
     ]);
 
     // Fetch live (or last-close) prices for all open positions (including shorts, which have qty < 0)
@@ -271,6 +284,41 @@ export default function HomeScreen() {
     setLivePortfolioValue(agentBudgetTotal + realizedPnl + unrealizedPnl);
     // Also update the profile balance in the background for persistence
     refreshProfile();
+
+    // ── Bug 2: blend realized + unrealized P&L per agent ───────────────────
+    const summaryRows = (agentSummaryRes.data as any[] | null) ?? [];
+    const unrealizedByAgent: Record<string, number> = {};
+    for (const r of summaryRows) {
+      const sym  = r.symbol as string;
+      const qty  = Number(r.net_qty);
+      const cost = Number(r.avg_cost);
+      const px   = prices[sym] ?? 0;
+      if (!px || !cost) continue;
+      const unreal = (px - cost) * qty;
+      unrealizedByAgent[r.agent_id] = (unrealizedByAgent[r.agent_id] ?? 0) + unreal;
+    }
+    const blended: Record<string, { pnl: number; pnlPct: number }> = {};
+    for (const a of agents) {
+      const total = a.pnl + (unrealizedByAgent[a.id] ?? 0);
+      const pct   = a.budget > 0 ? (total / a.budget) * 100 : 0;
+      blended[a.id] = { pnl: total, pnlPct: pct };
+    }
+    setAgentBlendedPnl(blended);
+
+    // ── Bug 17: per-agent max drawdown ─────────────────────────────────────
+    const ddMap: Record<string, number> = {};
+    for (const r of (agentDDRes.data as any[] | null) ?? []) {
+      ddMap[r.agent_id] = Number(r.max_drawdown_pct);
+    }
+    setAgentMaxDD(ddMap);
+
+    // ── Bug 16: per-agent cumulative P&L for sparklines ────────────────────
+    const histMap: Record<string, number[]> = {};
+    for (const r of (agentHistRes.data as any[] | null) ?? []) {
+      if (!histMap[r.agent_id]) histMap[r.agent_id] = [];
+      histMap[r.agent_id].push(Number(r.cum_pnl));
+    }
+    setAgentPnlHistory(histMap);
 
     setHoldings(updatedHoldings);
     setStats(s);
@@ -578,7 +626,22 @@ export default function HomeScreen() {
               </View>
 
               <View style={{ gap: 6, marginTop: 8 }}>
-                {balanceVisible ? (
+                {/* Bug 1: show loading skeleton until live prices arrive — never a stale value */}
+                {!balanceVisible ? (
+                  <Text style={{ color: colors.text, fontSize: 42, fontWeight: "800", letterSpacing: -2 }}>
+                    ••••••
+                  </Text>
+                ) : livePortfolioValue === null ? (
+                  <View
+                    style={{
+                      height: 50,
+                      width: 220,
+                      borderRadius: 10,
+                      backgroundColor: colors.cardSecondary,
+                      opacity: 0.6,
+                    }}
+                  />
+                ) : (
                   <AnimatedNumber
                     value={portfolioValue}
                     formatter={(v) => formatCurrency(v)}
@@ -589,10 +652,6 @@ export default function HomeScreen() {
                       letterSpacing: -2,
                     }}
                   />
-                ) : (
-                  <Text style={{ color: colors.text, fontSize: 42, fontWeight: "800", letterSpacing: -2 }}>
-                    ••••••
-                  </Text>
                 )}
 
                 {(() => {
@@ -787,13 +846,15 @@ export default function HomeScreen() {
           </View>
 
           {/* ── Holdings Section ─────────────────────────────────────────── */}
+          {/* Bug 5: subtitle now shows total deployed capital (matches portfolio
+              value when fully invested, less when there's idle cash). */}
           <SectionHeader
             title="Holdings"
             subtitle={
-              holdingsLoading
+              holdingsLoading || livePortfolioValue === null
                 ? "Loading…"
                 : holdings.length > 0
-                ? `${holdings.length} position${holdings.length !== 1 ? "s" : ""} · ${mask(formatCurrency(totalHoldingsValue))}`
+                ? `${holdings.length} position${holdings.length !== 1 ? "s" : ""} · ${mask(formatCurrency(portfolioValue))}`
                 : undefined
             }
             colors={colors}
@@ -904,21 +965,24 @@ export default function HomeScreen() {
             />
           </View>
 
-          {/* ── Active Agents ─────────────────────────────────────────────── */}
+          {/* ── Active Agents (Bug 10: show ALL agents regardless of mode) ── */}
           <SectionHeader
-            title={`${tradingMode === "live" ? "Live" : "Paper"} Agents`}
-            actionLabel={filteredAgents.length > 0 ? "View All" : undefined}
+            title="Your Agents"
+            actionLabel={agents.length > 0 ? "View All" : undefined}
             onAction={() => router.push("/(tabs)/agents")}
             colors={colors}
           />
 
-          {filteredAgents.length === 0 ? (
+          {agents.length === 0 ? (
             <EmptyAgentsCard tradingMode={tradingMode} colors={colors} isDark={isDark} />
           ) : (
-            filteredAgents.map((agent) => (
+            agents.map((agent) => (
               <AgentCard
                 key={agent.id}
                 agent={agent}
+                blendedPnl={agentBlendedPnl[agent.id]}
+                maxDDPct={agentMaxDD[agent.id]}
+                pnlHistory={agentPnlHistory[agent.id]}
                 colors={colors}
                 isDark={isDark}
                 onPress={() => router.push(`/agent/${agent.id}` as any)}
@@ -1195,12 +1259,35 @@ function HoldingRow({ holding, colors, isDark }: { holding: Holding; colors: any
 }
 
 // ─── AllocationBar ────────────────────────────────────────────────────────────
+// Bug 15: show top 10 + "Others" bucket so every position is accounted for.
 function AllocationBar({ holdings, totalValue, colors }: {
   holdings: Holding[];
   totalValue: number;
   colors: any;
 }) {
-  const top = holdings.slice(0, 8);
+  const sorted = [...holdings].sort(
+    (a, b) => Math.abs(b.currentValue) - Math.abs(a.currentValue),
+  );
+  const top = sorted.slice(0, 10);
+  const rest = sorted.slice(10);
+  const restValue = rest.reduce((s, h) => s + Math.abs(h.currentValue), 0);
+
+  const segments = [
+    ...top.map((h, i) => ({
+      key: h.symbol,
+      label: h.symbol,
+      value: Math.abs(h.currentValue),
+      color: ALLOC_COLORS[i % ALLOC_COLORS.length],
+    })),
+    ...(rest.length > 0
+      ? [{
+          key: "__others__",
+          label: `Others (${rest.length})`,
+          value: restValue,
+          color: colors.textTertiary,
+        }]
+      : []),
+  ];
 
   return (
     <View
@@ -1227,14 +1314,14 @@ function AllocationBar({ holdings, totalValue, colors }: {
 
       {/* Segmented bar */}
       <View style={{ flexDirection: "row", height: 8, borderRadius: 8, overflow: "hidden", gap: 1 }}>
-        {top.map((h, i) => {
-          const pct = totalValue > 0 ? (Math.abs(h.currentValue) / totalValue) * 100 : 0;
+        {segments.map((seg) => {
+          const pct = totalValue > 0 ? (seg.value / totalValue) * 100 : 0;
           return (
             <View
-              key={h.symbol}
+              key={seg.key}
               style={{
                 flex: pct,
-                backgroundColor: ALLOC_COLORS[i % ALLOC_COLORS.length],
+                backgroundColor: seg.color,
                 borderRadius: 2,
               }}
             />
@@ -1244,20 +1331,20 @@ function AllocationBar({ holdings, totalValue, colors }: {
 
       {/* Legend */}
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10 }}>
-        {top.map((h, i) => {
-          const pct = totalValue > 0 ? (Math.abs(h.currentValue) / totalValue) * 100 : 0;
+        {segments.map((seg) => {
+          const pct = totalValue > 0 ? (seg.value / totalValue) * 100 : 0;
           return (
-            <View key={h.symbol} style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
+            <View key={seg.key} style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
               <View
                 style={{
                   width: 8,
                   height: 8,
                   borderRadius: 4,
-                  backgroundColor: ALLOC_COLORS[i % ALLOC_COLORS.length],
+                  backgroundColor: seg.color,
                 }}
               />
               <Text style={{ color: colors.text, fontWeight: "700", fontSize: 12 }}>
-                {h.symbol}
+                {seg.label}
               </Text>
               <Text style={{ color: colors.textTertiary, fontSize: 11 }}>
                 {pct.toFixed(1)}%
@@ -1584,11 +1671,22 @@ function QuickAction({
   );
 }
 
-function AgentCard({ agent, colors, isDark, onPress }: {
-  agent: Agent; colors: any; isDark: boolean; onPress: () => void;
+function AgentCard({ agent, blendedPnl, maxDDPct, pnlHistory, colors, isDark, onPress }: {
+  agent: Agent;
+  blendedPnl?: { pnl: number; pnlPct: number };
+  maxDDPct?: number;
+  pnlHistory?: number[];
+  colors: any;
+  isDark: boolean;
+  onPress: () => void;
 }) {
   const dotColor = STATUS_DOT[agent.status] ?? colors.textTertiary;
   const isActive = agent.status === "active";
+  // Bug 2: prefer blended (realized + unrealized) over raw realized-only pnl
+  const displayPnl    = blendedPnl?.pnl    ?? agent.pnl;
+  const displayPnlPct = blendedPnl?.pnlPct ?? agent.pnlPct;
+  // Bug 17: prefer per-agent max DD computed from trades
+  const displayMaxDD  = maxDDPct ?? agent.maxDrawdown;
 
   return (
     <Pressable
@@ -1625,15 +1723,26 @@ function AgentCard({ agent, colors, isDark, onPress }: {
         </View>
         <View style={{ alignItems: "flex-end", gap: 4 }}>
           <AnimatedNumber
-            value={agent.pnl}
+            value={displayPnl}
             formatter={(v) => formatCurrency(v, true)}
-            style={{ color: agent.pnl >= 0 ? Colors.success : Colors.danger, fontWeight: "800", fontSize: 16 }}
+            style={{ color: displayPnl >= 0 ? Colors.success : Colors.danger, fontWeight: "800", fontSize: 16 }}
           />
-          <Text style={{ color: agent.pnl >= 0 ? Colors.success : Colors.danger, fontSize: 12, fontWeight: "600" }}>
-            {formatPercent(agent.pnlPct)}
+          <Text style={{ color: displayPnl >= 0 ? Colors.success : Colors.danger, fontSize: 12, fontWeight: "600" }}>
+            {formatPercent(displayPnlPct)}
           </Text>
         </View>
       </View>
+
+      {pnlHistory && pnlHistory.length >= 2 && (
+        <View style={{ marginTop: 12, alignItems: "stretch" }}>
+          <Sparkline
+            prices={pnlHistory}
+            width={280}
+            height={32}
+            color={displayPnl >= 0 ? Colors.success : Colors.danger}
+          />
+        </View>
+      )}
 
       <View
         style={{
@@ -1645,7 +1754,7 @@ function AgentCard({ agent, colors, isDark, onPress }: {
         {[
           { label: "Trades", value: `${agent.trades}` },
           { label: "Win Rate", value: agent.status === "backtesting" ? "—" : `${agent.winRate.toFixed(1)}%` },
-          { label: "Max DD", value: agent.status === "backtesting" ? "—" : `${agent.maxDrawdown.toFixed(1)}%` },
+          { label: "Max DD", value: agent.status === "backtesting" ? "—" : `${displayMaxDD.toFixed(1)}%` },
           { label: "Sharpe", value: agent.status === "backtesting" ? "—" : `${agent.sharpeRatio.toFixed(1)}` },
         ].map((s) => (
           <View key={s.label} style={{ alignItems: "center", gap: 3 }}>

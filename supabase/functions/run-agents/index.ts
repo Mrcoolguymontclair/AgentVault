@@ -310,6 +310,32 @@ async function runAgent(
       }
     }
 
+    // ── Bug 8: Max-positions cap (5 per agent for NEW symbols only) ───────────
+    // Counts open longs + open shorts. Adding to an existing position is allowed.
+    if (isLongBuy || isShortEntry) {
+      const openPositions = Object.entries(agentPositions).filter(
+        ([_sym, q]) => Math.abs(q) > 0.00001,
+      );
+      const alreadyHeld = (agentPositions[signal.symbol] ?? 0) !== 0;
+      if (!alreadyHeld && openPositions.length >= 5) {
+        const skipReason = `Max positions reached (${openPositions.length}/5) — skipping new ${signal.symbol}`;
+        await logExecution(supabase, agent, { action: "skipped", skip_reason: skipReason, signal_detected: true, signal_symbol: signal.symbol, signal_side: signal.side });
+        return { ...base, skipped: true, skipReason };
+      }
+    }
+
+    // ── Bug 7: Hard price floor — reject penny stocks even if a strategy
+    // somehow generates a sub-$15 signal (defense in depth alongside the
+    // per-strategy isQualityStock filter in strategies.ts).
+    if (isLongBuy || isShortEntry) {
+      if (signal.marketData.currentPrice < 15) {
+        const skipReason = `[FILTER] ${signal.symbol} rejected: price $${signal.marketData.currentPrice.toFixed(2)} < $15 minimum`;
+        console.log(skipReason);
+        await logExecution(supabase, agent, { action: "skipped", skip_reason: skipReason, signal_detected: true, signal_symbol: signal.symbol, signal_side: signal.side });
+        return { ...base, skipped: true, skipReason };
+      }
+    }
+
     // ── AI confirmation ───────────────────────────────────────
     // Some strategies (News Trader, Blind Quant) already made the Groq decision
     // internally — skip confirmTrade and use their result directly.
@@ -405,24 +431,37 @@ async function runAgent(
     }
 
     // ── P&L for this trade ────────────────────────────────────
+    // Bug 3: avgCost was sometimes 0 (no prior buy in DB → e.g. position was
+    // opened on Alpaca but trade insert failed before). Fall back to Alpaca's
+    // own avg_entry_price for the position so we still record real P&L.
     let tradePnl = 0;
+    const alpacaAvgPrice = Number(alpacaPositions[signal.symbol]?.avg_entry_price ?? 0);
+
     if (signal.side === "sell" && !isShortEntry) {
       // Closing a long position
-      const avgCost = agentAvgCost[signal.symbol] ?? 0;
+      let avgCost = agentAvgCost[signal.symbol] ?? 0;
+      if (avgCost <= 0 && alpacaAvgPrice > 0) {
+        console.log(`[pnl] SELL ${signal.symbol}: local avgCost missing — using Alpaca avg_entry_price $${alpacaAvgPrice.toFixed(2)}`);
+        avgCost = alpacaAvgPrice;
+      }
       if (avgCost > 0) {
         tradePnl = (fillPrice - avgCost) * qty;
         console.log(`[pnl] SELL ${signal.symbol}: ($${fillPrice.toFixed(2)} - $${avgCost.toFixed(2)}) × ${qty} = $${tradePnl.toFixed(2)}`);
       } else {
-        console.warn(`[pnl] SELL ${signal.symbol}: avg cost missing — pnl recorded as $0`);
+        console.error(`[pnl] SELL ${signal.symbol}: avg cost missing in BOTH local AND Alpaca — pnl recorded as $0. agentAvgCost=${JSON.stringify(agentAvgCost[signal.symbol])} alpacaPos=${JSON.stringify(alpacaPositions[signal.symbol])}`);
       }
     } else if (isShortCover) {
       // Covering a short: profit = (short entry price − cover price) × qty
-      const shortEntryPrice = agentAvgCost[signal.symbol] ?? 0;
+      let shortEntryPrice = agentAvgCost[signal.symbol] ?? 0;
+      if (shortEntryPrice <= 0 && alpacaAvgPrice > 0) {
+        console.log(`[pnl] SHORT COVER ${signal.symbol}: local entry missing — using Alpaca avg_entry_price $${alpacaAvgPrice.toFixed(2)}`);
+        shortEntryPrice = alpacaAvgPrice;
+      }
       if (shortEntryPrice > 0) {
         tradePnl = (shortEntryPrice - fillPrice) * qty;
         console.log(`[pnl] SHORT COVER ${signal.symbol}: ($${shortEntryPrice.toFixed(2)} - $${fillPrice.toFixed(2)}) × ${qty} = $${tradePnl.toFixed(2)}`);
       } else {
-        console.warn(`[pnl] SHORT COVER ${signal.symbol}: entry price missing — pnl recorded as $0`);
+        console.error(`[pnl] SHORT COVER ${signal.symbol}: entry price missing in BOTH local AND Alpaca — pnl recorded as $0`);
       }
     }
     // Short entry (isShortEntry) and long buys: PnL = 0 (realized later)

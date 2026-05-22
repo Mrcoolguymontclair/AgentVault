@@ -368,19 +368,33 @@ export default function SocialScreen() {
   const realtimeRef = useRef<RealtimeChannel | null>(null);
 
   // Load feed
+  // Bug 13 + 14: feed should show MOST RECENT trades across ALL public agents
+  // the user is interested in. Build the agent set from followed + the user's
+  // own public agents + top leaderboard agents so the feed is never empty and
+  // stays up to date.
   const loadFeed = useCallback(async () => {
     if (!authUser?.id) return;
     const followed = await fetchFollowedAgentIds(authUser.id);
     setFollowedIds(followed);
 
-    const { data } = await fetchTradeFeed([...followed], 40);
+    // Combine followed + top-50 public leaderboard agents so the feed shows
+    // recent activity from every public agent, not just one (Bug 14).
+    const { data: lb } = await fetchAgentLeaderboard(50);
+    const agentIds = new Set<string>(followed);
+    for (const a of lb) agentIds.add(a.id);
+
+    const { data } = await fetchTradeFeed([...agentIds], 40);
     setTrades(data);
   }, [authUser?.id]);
 
   // Load discover
   const loadDiscover = useCallback(async () => {
     const { data } = await fetchAgentLeaderboard(50);
-    setLeaderboard(data);
+    // Bug 12: filter out the current user's own agents from Discover
+    const filtered = authUser?.id
+      ? data.filter((a) => a.user_id !== authUser.id)
+      : data;
+    setLeaderboard(filtered);
 
     if (authUser?.id) {
       const followed = await fetchFollowedAgentIds(authUser.id);
@@ -395,17 +409,22 @@ export default function SocialScreen() {
     loadDiscover();
   }, [loadFeed, loadDiscover]);
 
-  // Realtime feed subscription
+  // Realtime feed subscription (Bug 14: subscribe to ALL public agents in the
+  // feed, not just the ones the user follows).
   useEffect(() => {
-    if (followedIds.size === 0) return;
+    const feedAgentIds = new Set<string>([
+      ...followedIds,
+      ...leaderboard.map((a) => a.id),
+    ]);
+    if (feedAgentIds.size === 0) return;
     realtimeRef.current?.unsubscribe();
-    realtimeRef.current = subscribeToFeedTrades(followedIds, (newTrade) => {
+    realtimeRef.current = subscribeToFeedTrades(feedAgentIds, (newTrade) => {
       setTrades((prev) => [newTrade, ...prev].slice(0, 60));
     });
     return () => {
       realtimeRef.current?.unsubscribe();
     };
-  }, [followedIds]);
+  }, [followedIds, leaderboard]);
 
   async function onRefresh() {
     setRefreshing(true);

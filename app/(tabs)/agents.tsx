@@ -25,6 +25,8 @@ import { Colors } from "@/constants/colors";
 import { STRATEGIES, RISK_CONFIG } from "@/constants/strategies";
 import type { StrategyId } from "@/constants/strategies";
 import { fetchAgentPnlHistories } from "@/lib/services/portfolioService";
+import { fetchCurrentPrices } from "@/lib/services/portfolioService";
+import { supabase } from "@/lib/supabase";
 
 type FilterStatus = "all" | AgentStatus;
 
@@ -44,22 +46,72 @@ export default function AgentsScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [showDeploy, setShowDeploy] = useState(false);
   const [pnlHistories, setPnlHistories] = useState<Record<string, number[]>>({});
+  // Bug 17: per-agent max drawdown computed from trades
+  const [agentMaxDD, setAgentMaxDD] = useState<Record<string, number>>({});
+  // Bug 2: per-agent realized + unrealized P&L
+  const [agentBlendedPnl, setAgentBlendedPnl] = useState<Record<string, { pnl: number; pnlPct: number }>>({});
 
   const filtered = filter === "all" ? agents : agents.filter((a) => a.status === filter);
   const activeCount = agents.filter((a) => a.status === "active").length;
 
-  const loadSparklines = useCallback(async () => {
-    if (agents.length === 0) return;
-    const histories = await fetchAgentPnlHistories(agents.map((a) => a.id), 30);
-    setPnlHistories(histories);
-  }, [agents]);
+  const loadAgentDerived = useCallback(async () => {
+    if (agents.length === 0 || !authUser?.id) return;
 
-  useEffect(() => { loadSparklines(); }, [loadSparklines]);
+    // Bug 16: cumulative daily P&L for sparklines (uses trades, not snapshots)
+    const histRes = await supabase.rpc("rpc_get_agent_pnl_history", {
+      p_user_id: authUser.id,
+      p_days: 30,
+    });
+    const histMap: Record<string, number[]> = {};
+    for (const r of (histRes.data as any[] | null) ?? []) {
+      if (!histMap[r.agent_id]) histMap[r.agent_id] = [];
+      histMap[r.agent_id].push(Number(r.cum_pnl));
+    }
+    // Fallback to snapshot-based sparklines for any agent without trades yet
+    if (Object.keys(histMap).length < agents.length) {
+      const snapHist = await fetchAgentPnlHistories(agents.map((a) => a.id), 30);
+      for (const [id, arr] of Object.entries(snapHist)) {
+        if (!histMap[id] || histMap[id].length < 2) histMap[id] = arr;
+      }
+    }
+    setPnlHistories(histMap);
+
+    // Bug 17: per-agent max drawdown
+    const ddRes = await supabase.rpc("rpc_get_agent_max_drawdowns", { p_user_id: authUser.id });
+    const ddMap: Record<string, number> = {};
+    for (const r of (ddRes.data as any[] | null) ?? []) {
+      ddMap[r.agent_id] = Number(r.max_drawdown_pct);
+    }
+    setAgentMaxDD(ddMap);
+
+    // Bug 2: blend realized + unrealized P&L per agent
+    const sumRes = await supabase.rpc("rpc_get_agent_pnl_summary", { p_user_id: authUser.id });
+    const summaryRows = (sumRes.data as any[] | null) ?? [];
+    const openSymbols = Array.from(new Set(summaryRows.map((r) => r.symbol)));
+    const prices = await fetchCurrentPrices(openSymbols);
+    const unrealizedByAgent: Record<string, number> = {};
+    for (const r of summaryRows) {
+      const px = prices[r.symbol] ?? 0;
+      const cost = Number(r.avg_cost);
+      const qty = Number(r.net_qty);
+      if (!px || !cost) continue;
+      unrealizedByAgent[r.agent_id] = (unrealizedByAgent[r.agent_id] ?? 0) + (px - cost) * qty;
+    }
+    const blended: Record<string, { pnl: number; pnlPct: number }> = {};
+    for (const a of agents) {
+      const total = a.pnl + (unrealizedByAgent[a.id] ?? 0);
+      const pct = a.budget > 0 ? (total / a.budget) * 100 : 0;
+      blended[a.id] = { pnl: total, pnlPct: pct };
+    }
+    setAgentBlendedPnl(blended);
+  }, [agents, authUser?.id]);
+
+  useEffect(() => { loadAgentDerived(); }, [loadAgentDerived]);
 
   async function onRefresh() {
     setRefreshing(true);
     if (authUser?.id) await loadAgents(authUser.id);
-    await loadSparklines();
+    await loadAgentDerived();
     setRefreshing(false);
   }
 
@@ -204,6 +256,8 @@ export default function AgentsScreen() {
               agent={agent}
               colors={colors}
               pnlHistory={pnlHistories[agent.id] ?? []}
+              maxDDPct={agentMaxDD[agent.id]}
+              blendedPnl={agentBlendedPnl[agent.id]}
               onPress={() => router.push(`/agent/${agent.id}` as any)}
               onToggle={() => toggleAgent(agent.id)}
             />
@@ -228,12 +282,16 @@ function AgentCard({
   agent,
   colors,
   pnlHistory,
+  maxDDPct,
+  blendedPnl,
   onPress,
   onToggle,
 }: {
   agent: Agent;
   colors: any;
   pnlHistory: number[];
+  maxDDPct?: number;
+  blendedPnl?: { pnl: number; pnlPct: number };
   onPress: () => void;
   onToggle: () => void;
 }) {
@@ -241,6 +299,10 @@ function AgentCard({
   const canToggle = agent.status === "active" || agent.status === "paused";
   const strategyDef = STRATEGIES.find((s) => s.id === (agent.strategy as StrategyId));
   const riskConfig = strategyDef ? RISK_CONFIG[strategyDef.risk] : null;
+  // Bugs 2 + 17: prefer blended P&L and trade-derived max DD
+  const displayPnl    = blendedPnl?.pnl    ?? agent.pnl;
+  const displayPnlPct = blendedPnl?.pnlPct ?? agent.pnlPct;
+  const displayMaxDD  = maxDDPct ?? agent.maxDrawdown;
 
   return (
     <PressableCard onPress={onPress}>
@@ -281,21 +343,21 @@ function AgentCard({
         <View style={{ alignItems: "flex-end", gap: 4 }}>
           <Text
             style={{
-              color: agent.pnl >= 0 ? Colors.success : Colors.danger,
+              color: displayPnl >= 0 ? Colors.success : Colors.danger,
               fontWeight: "800",
               fontSize: 18,
             }}
           >
-            {formatCurrency(agent.pnl, true)}
+            {formatCurrency(displayPnl, true)}
           </Text>
           <Text
             style={{
-              color: agent.pnl >= 0 ? Colors.success : Colors.danger,
+              color: displayPnl >= 0 ? Colors.success : Colors.danger,
               fontSize: 13,
               fontWeight: "600",
             }}
           >
-            {formatPercent(agent.pnlPct)}
+            {formatPercent(displayPnlPct)}
           </Text>
         </View>
       </View>
@@ -308,7 +370,7 @@ function AgentCard({
             prices={pnlHistory}
             width={80}
             height={28}
-            color={agent.pnl >= 0 ? Colors.success : Colors.danger}
+            color={displayPnl >= 0 ? Colors.success : Colors.danger}
             strokeWidth={1.5}
           />
         )}
@@ -325,7 +387,7 @@ function AgentCard({
         />
         <StatMini
           label="Max DD"
-          value={agent.status === "backtesting" ? "—" : `${agent.maxDrawdown}%`}
+          value={agent.status === "backtesting" ? "—" : `${displayMaxDD.toFixed(1)}%`}
           negative
           colors={colors}
         />

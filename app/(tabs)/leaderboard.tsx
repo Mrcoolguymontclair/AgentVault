@@ -745,7 +745,7 @@ function AgentRow({
         </Text>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
           <Text style={{ color: colors.textTertiary, fontSize: 11 }}>
-            {entry.win_rate > 0 ? `${entry.win_rate.toFixed(0)}% WR` : "No trades"}
+            {(entry.trades_count ?? 0) > 0 ? `${(entry.win_rate ?? 0).toFixed(0)}% WR` : "No trades"}
           </Text>
           <Text style={{ color: colors.textTertiary }}>·</Text>
           <View style={{ flexDirection: "row", alignItems: "center", gap: 3 }}>

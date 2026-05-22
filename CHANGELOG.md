@@ -4,6 +4,45 @@ All notable changes to this project are documented here. Newest entries at the t
 
 ---
 
+## [2026-05-22] — 20-Bug Comprehensive Audit Fix
+
+### Critical Data / Calculation (Bugs 1–6)
+- **BUG 1 — Portfolio value wrong on first load:** Home now renders a loading skeleton while `livePortfolioValue === null` (avoids flashing stale `totalBudget + totalPnL`)
+- **BUG 2 — Agent P&L showing $0.00 except Surge Bot:** New `rpc_get_agent_pnl_summary` returns per-agent open positions; home + agents pages blend realized + live unrealized P&L using `fetchCurrentPrices`
+- **BUG 3 — Sell trade P&L still 0:** Edge function now falls back to `alpacaPositions[symbol].avg_entry_price` when local `agentAvgCost` is missing, with error log if both are absent
+- **BUG 4 — Win-rate inconsistency:** `rpc_update_agent_stats` now counts only closed sells with `pnl != 0` as the win-rate denominator (single source of truth)
+- **BUG 5 — Holdings total doesn't match portfolio:** Holdings subtitle now reads `portfolioValue` directly instead of `totalHoldingsValue`
+- **BUG 6 — Trade count discrepancies:** Migration 022 backfills `agents.trades_count` / `win_rate` / `pnl` from the trades table for every agent; all UI now reads from the same source
+
+### Strategy / Trading (Bugs 7–9)
+- **BUG 7 — $15 min price filter not working:** Edge function now hard-rejects any symbol with price < $15 before strategy logic runs; `[FILTER] X rejected: ...` log added for visibility
+- **BUG 8 — Too many open positions:** Edge function enforces max 5 distinct symbols per agent; new buys on new symbols are skipped when at cap
+- **BUG 9 — Strategy Lab (Evo Bot) never traded:** Removed 4:00–4:45 PM ET time gating; added `DEFAULT_BOOTSTRAP_RULES` so the lab trades immediately even before rules graduate
+
+### UI / Display (Bugs 10–17)
+- **BUG 10 — Home only shows 3 of 5 agents:** "Paper Agents" → "Your Agents"; section now renders the full `agents` array (no mode filter)
+- **BUG 11 — Leaderboard "No trades" for agents with trades:** `agent_leaderboard` view rebuilt with trade_stats CTE computing `trades_count`, `win_rate`, `pnl` from the trades table; leaderboard row condition changed from `win_rate > 0` to `trades_count > 0`
+- **BUG 12 — Could follow own agents on Discover:** Discover list now filters `a.user_id !== authUser.id`
+- **BUG 13 — Social feed shows trades from 59d ago:** Feed pulls from `followed + top-50 leaderboard` agent IDs so recent trades from any public agent appear
+- **BUG 14 — Social feed only showed one agent:** Realtime subscription now listens to `new Set([...followedIds, ...leaderboard.map(a => a.id)])`
+- **BUG 15 — Allocation bar incomplete:** Rewritten to sort by `|currentValue|`, show top 10 + "Others (N)" bucket
+- **BUG 16 — Agent card sparklines missing data:** New `rpc_get_agent_pnl_history` returns 30-day cumulative P&L per agent; sparkline now rendered inside `AgentCard` on home page
+- **BUG 17 — Max DD 0% on all agent cards:** New `rpc_get_agent_max_drawdowns` computes per-agent max DD from cumulative trade P&L vs running peak; surfaced on home + agents pages
+
+### Quick Fixes (Bugs 18–20)
+- **BUG 18 — "Active since" hardcoded:** `rpc_get_portfolio_stats` returns `MIN(executed_at)` from user's trades
+- **BUG 19 — Best/worst trade ignored buys with $0 pnl:** Both now sourced from the `closed_trades` CTE (sells/covers with `pnl != 0` only)
+- **BUG 20 — Sharpe too high vs Max DD:** Sharpe now computed from per-day realized P&L returns over portfolio budget (not snapshot-value noise); requires ≥3 days of returns
+
+### New migrations
+- `supabase/migrations/022_bug_fixes.sql` — fixes Bugs 2, 4, 6, 11, 17, 18, 19, 20 + new RPCs for client-side blending (Bug 2, 16, 17)
+
+### Deployment steps
+1. Run `supabase/migrations/022_bug_fixes.sql` in the Supabase SQL Editor
+2. Redeploy edge function: `supabase functions deploy run-agents --no-verify-jwt`
+
+---
+
 ## [2026-03-25] — 27-Bug Audit Fix (Critical → Medium)
 
 ### Critical

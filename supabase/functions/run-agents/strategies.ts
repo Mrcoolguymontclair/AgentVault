@@ -72,14 +72,25 @@ function heldSymbols(positions: Record<string, number>): string[] {
 /**
  * Quality filter: reject penny stocks and illiquid names before any strategy logic.
  * Requires price >= $15 AND average daily volume >= 500,000 shares.
+ * Logs rejection reason (Bug 7).
  */
-function isQualityStock(bars: BarData[]): boolean {
-  if (bars.length < 5) return false;
+function isQualityStock(bars: BarData[], symbol = ""): boolean {
+  if (bars.length < 5) {
+    if (symbol) console.log(`[FILTER] ${symbol} rejected: insufficient bars (${bars.length}<5)`);
+    return false;
+  }
   const currentPrice = bars[bars.length - 1].c;
-  if (currentPrice < 15) return false;
+  if (currentPrice < 15) {
+    if (symbol) console.log(`[FILTER] ${symbol} rejected: price $${currentPrice.toFixed(2)} < $15 minimum`);
+    return false;
+  }
   const lookback = Math.min(20, bars.length);
   const avgVolume = bars.slice(-lookback).reduce((sum, b) => sum + b.v, 0) / lookback;
-  return avgVolume >= 500_000;
+  if (avgVolume < 500_000) {
+    if (symbol) console.log(`[FILTER] ${symbol} rejected: avg volume ${Math.round(avgVolume).toLocaleString()} < 500k`);
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -182,7 +193,7 @@ export async function momentumRider(
     }
 
     // Quality filter: price >= $15, avg daily volume >= 500k
-    if (!isQualityStock(bars)) {
+    if (!isQualityStock(bars, symbol)) {
       diagLines.push(`${symbol}:low_quality_$${bars[bars.length - 1].c.toFixed(2)}`);
       continue;
     }
@@ -328,7 +339,7 @@ export async function meanReversion(
     }
 
     // Quality filter: price >= $15, avg daily volume >= 500k
-    if (!isQualityStock(bars)) {
+    if (!isQualityStock(bars, symbol)) {
       diagLines.push(`${symbol}:low_quality_$${bars[bars.length - 1].c.toFixed(2)}`);
       continue;
     }
@@ -610,7 +621,7 @@ export async function blindQuant(
     if (bars.length < 22) continue;
 
     // Quality filter: only anonymize liquid, mid/large-cap stocks
-    if (!isQualityStock(bars)) continue;
+    if (!isQualityStock(bars, symbol)) continue;
 
     const closes = bars.map((b) => b.c);
     const volumes = bars.map((b) => b.v);
@@ -929,7 +940,7 @@ export async function predictionArb(
     if (bars.length < 10) continue;
 
     // Quality filter: price >= $15, avg daily volume >= 500k
-    if (!isQualityStock(bars)) continue;
+    if (!isQualityStock(bars, symbol)) continue;
 
     const closes = bars.map((b) => b.c);
     const currentPrice = closes[closes.length - 1];
@@ -1058,7 +1069,7 @@ export async function customStrategy(
       const bars = await getDailyBars(symbol, 25);
       if (bars.length < 20) continue;
       // Quality filter: price >= $15, avg daily volume >= 500k
-      if (!isQualityStock(bars)) continue;
+      if (!isQualityStock(bars, symbol)) continue;
       const closes = bars.map((b) => b.c);
       const currentPrice = closes[closes.length - 1];
       const prevClose = closes[closes.length - 2];
@@ -1158,50 +1169,31 @@ export async function customStrategy(
 // Strategy Lab — meta-learning agent that evolves strategies
 // Runs daily at market close (4:05–4:30 PM ET)
 // ─────────────────────────────────────────────────────────────
-function isStrategyLabTime(): boolean {
-  const now = new Date();
-  const etStr = now.toLocaleString("en-US", {
-    timeZone: "America/New_York",
-    hour12: false,
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-  const match = etStr.match(/(\d+):(\d+)/);
-  if (!match) return false;
-  const h = parseInt(match[1], 10);
-  const m = parseInt(match[2], 10);
-  // 4:00 PM – 4:45 PM ET
-  return h === 16 && m <= 45;
-}
-
+// Bug 9: Strategy Lab now trades during market hours, not just 4:00–4:45 PM.
+// The "evolution cycle" can still be scheduled separately by the runtime —
+// but the agent itself should generate trades like any other strategy.
 async function strategyLab(
   config: Record<string, any>,
   agentPositions: Record<string, number>,
   agentAvgCost: Record<string, number>,
   agentPositionOpenedAt: Record<string, string> = {},
 ): Promise<TradeSignal | null> {
-  // Strategy Lab only runs once per day at market close
-  if (!isStrategyLabTime()) {
-    _lastStrategyDiagnostics = "[strategy_lab] Waiting for market close (4:00–4:45 PM ET)";
-    return null;
-  }
+  _lastStrategyDiagnostics = "[strategy_lab] Running evolution cycle";
+  console.log(`[strategy_lab] entered — bestRules present=${!!config.best_rules}`);
 
-  // Strategy Lab doesn't emit individual trade signals directly —
-  // it manages strategy_generations via the DB. The actual trades
-  // are handled by running each active generation as a custom strategy.
-  // For now, use the best graduated generation's rules (if any) as a
-  // custom strategy to execute live trades.
-  _lastStrategyDiagnostics = "[strategy_lab] Running daily evolution cycle";
+  // Use the lab's best graduated rules if available, otherwise bootstrap with
+  // a default high-quality momentum + mean-reversion blend so the agent
+  // actually trades while the lab is still learning.
+  const DEFAULT_BOOTSTRAP_RULES =
+    "Buy liquid large-cap stocks with strong 5-day momentum (>3%) and RSI between 40–70, " +
+    "avoiding overbought conditions. Sell when RSI exceeds 75 or the position is down more " +
+    "than 5% from entry. Only trade stocks priced above $15 with daily volume over 500k shares. " +
+    "Prefer S&P 500 names over speculative small caps.";
 
-  // Pick best performing held position to potentially exit
-  const heldSyms = Object.keys(agentPositions).filter((s) => (agentPositions[s] ?? 0) !== 0);
-
-  // Execute as a custom strategy using the lab's best rules
-  // (rules stored in config.best_rules — populated by daily cron)
-  const bestRules = config.best_rules as string | undefined;
-  if (!bestRules) {
-    _lastStrategyDiagnostics = "[strategy_lab] No graduated rules yet — lab is bootstrapping";
-    return null;
+  const bestRules = (config.best_rules as string | undefined) ?? DEFAULT_BOOTSTRAP_RULES;
+  if (!config.best_rules) {
+    console.log("[strategy_lab] No graduated rules yet — using bootstrap ruleset");
+    _lastStrategyDiagnostics += " | bootstrapping with default rules";
   }
 
   return customStrategy(
