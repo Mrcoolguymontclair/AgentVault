@@ -4,6 +4,27 @@ All notable changes to this project are documented here. Newest entries at the t
 
 ---
 
+## [2026-05-23] — Follow-up Critical Dashboard Fixes (Bugs A–C)
+
+### Bug A — Portfolio value wrong on first load ($174.52 vs $5,174.52)
+- Root cause: `loadHoldingsAndStats` ran on `authUser?.id` change only, before `agents` had populated. With `agents = []`, `agentBudgetTotal = 0`, so `setLivePortfolioValue` locked in `0 + realized + unrealized` = realized P&L only.
+- Fix: effect now also depends on `agents.length`; `loadHoldingsAndStats` early-returns when no agents are loaded yet (re-fires when they arrive).
+- Display: portfolio value now shows `totalBudget + realized` immediately with a "Loading prices…" subtitle, then animates to the final `totalBudget + realized + unrealized` once `get-current-prices` returns. Skeleton only appears when totalBudget is also unknown.
+
+### Bug B — Win Rate quick stat always 0%
+- Quick stat read `avgWinRate` (mean of `agent.winRate` rows, which are stale 0% until next trade). The Performance section reads `rpc_get_portfolio_stats`.
+- Fix: Win Rate quick stat now reads `stats?.winRate` / `stats?.totalTrades` — same source as the Performance section. Shows "—" until stats load.
+
+### Bug C — Chart Y-axis range wrong ($900–$2,100 vs $5,174 portfolio)
+- Root cause: `portfolio_snapshots` has partial per-agent coverage (only updated when an agent trades), so the SUM-per-day undercounts the portfolio.
+- Fix: dashboard chart now always uses `buildChartFromTrades(userId, currentValue, days, totalBudget)`. Each point is `totalBudget + cumulative_realized_pnl_at_that_date`. Final point is pinned to live portfolio value.
+- `fetchPortfolioSnapshots` import removed from `index.tsx`.
+
+### Deployment steps
+- Frontend only — no migration or edge function redeploy required.
+
+---
+
 ## [2026-05-22] — 20-Bug Comprehensive Audit Fix
 
 ### Critical Data / Calculation (Bugs 1–6)

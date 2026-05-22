@@ -27,7 +27,6 @@ import { Modal } from "@/components/ui/Modal";
 import { formatCurrency, formatPercent } from "@/utils/format";
 import { Colors } from "@/constants/colors";
 import {
-  fetchPortfolioSnapshots,
   buildChartFromTrades,
   fetchSpyBars,
   buildSpyOverlay,
@@ -189,8 +188,9 @@ export default function HomeScreen() {
   const totalHoldingsValue = holdings.reduce((s, h) => s + Math.abs(h.currentValue), 0);
   // Per-agent budget model: portfolio value = SUM(agent budgets) + SUM(agent P&L)
   const totalBudget = filteredAgents.reduce((s, a) => s + a.budget, 0);
-  // Live value = totalBudget + realizedPnL + unrealizedPnL (computed after fetching current prices)
-  // Falls back to budget + P&L estimate
+  // Bug A: portfolio value formula is ALWAYS totalBudget + realized + unrealized.
+  // While unrealized is loading, fall back to totalBudget + totalPnL (realized only)
+  // — never drop the budget base (which would show "$174.52" instead of "$5,174.52").
   const portfolioValue = livePortfolioValue ?? (totalBudget + totalPnL);
 
   // ─── Cache key ────────────────────────────────────────────────────────────
@@ -223,14 +223,14 @@ export default function HomeScreen() {
         } catch {}
       }
 
+      // Bug C: always build the chart from trades so the Y-axis matches the
+      // portfolio value. portfolio_snapshots is unreliable (partial per-agent
+      // coverage causes the Y-axis to undershoot, e.g. $900–$2,100 when the
+      // portfolio is actually $5,174). buildChartFromTrades plots
+      //   totalBudget + cumulative_realized_pnl_at_that_date
+      // and pins the final point to the current live portfolio value.
       let data: ChartPoint[] = [];
-      if (authUser?.id) {
-        data = await fetchPortfolioSnapshots(authUser.id, tf);
-      }
-
-      const hasRealData = data.length >= 2;
-
-      if (!hasRealData && authUser?.id) {
+      if (authUser?.id && totalBudget > 0) {
         const days = tf === "1W" ? 7 : tf === "1M" ? 30 : tf === "3M" ? 90 : 365;
         data = await buildChartFromTrades(authUser.id, portfolioValueRef.current, days, totalBudget);
       }
@@ -238,7 +238,7 @@ export default function HomeScreen() {
       setChartData(data);
       setChartLoading(false);
 
-      if (hasRealData) {
+      if (data.length >= 2) {
         try {
           const raw = await AsyncStorage.getItem(cacheKey);
           const cache: DashboardCache = raw
@@ -251,12 +251,17 @@ export default function HomeScreen() {
         } catch {}
       }
     },
-    [authUser?.id, totalPnL, cacheKey]
+    [authUser?.id, totalPnL, cacheKey, totalBudget]
   );
 
   // ─── Load holdings + stats + live prices ─────────────────────────────────
   const loadHoldingsAndStats = useCallback(async () => {
     if (!authUser?.id) return;
+    // Bug A: agents are loaded asynchronously after auth. If they haven't
+    // arrived yet, `agents` is [] so agentBudgetTotal would be 0 and
+    // livePortfolioValue would lock in as just (realized + unrealized).
+    // Wait for agents — the effect re-fires when agents.length changes.
+    if (agents.length === 0) return;
     setHoldingsLoading(true);
     setStatsLoading(true);
 
@@ -346,7 +351,7 @@ export default function HomeScreen() {
   useEffect(() => {
     loadHoldingsAndStats();
     refreshProfile();
-  }, [authUser?.id]);
+  }, [authUser?.id, agents.length]);
 
   useEffect(() => {
     if (chartData.length > 0) {
@@ -626,12 +631,13 @@ export default function HomeScreen() {
               </View>
 
               <View style={{ gap: 6, marginTop: 8 }}>
-                {/* Bug 1: show loading skeleton until live prices arrive — never a stale value */}
+                {/* Bug A: show totalBudget immediately, then animate to live value
+                    once prices load. Never show just P&L without the budget base. */}
                 {!balanceVisible ? (
                   <Text style={{ color: colors.text, fontSize: 42, fontWeight: "800", letterSpacing: -2 }}>
                     ••••••
                   </Text>
-                ) : livePortfolioValue === null ? (
+                ) : totalBudget === 0 && livePortfolioValue === null ? (
                   <View
                     style={{
                       height: 50,
@@ -642,16 +648,23 @@ export default function HomeScreen() {
                     }}
                   />
                 ) : (
-                  <AnimatedNumber
-                    value={portfolioValue}
-                    formatter={(v) => formatCurrency(v)}
-                    style={{
-                      color: colors.text,
-                      fontSize: 42,
-                      fontWeight: "800",
-                      letterSpacing: -2,
-                    }}
-                  />
+                  <>
+                    <AnimatedNumber
+                      value={portfolioValue}
+                      formatter={(v) => formatCurrency(v)}
+                      style={{
+                        color: colors.text,
+                        fontSize: 42,
+                        fontWeight: "800",
+                        letterSpacing: -2,
+                      }}
+                    />
+                    {livePortfolioValue === null && (
+                      <Text style={{ color: colors.textTertiary, fontSize: 11, marginTop: -2 }}>
+                        Loading prices…
+                      </Text>
+                    )}
+                  </>
                 )}
 
                 {(() => {
@@ -828,15 +841,24 @@ export default function HomeScreen() {
             <QuickStatCard
               label="Win Rate"
               value={
-                <Text
-                  style={{
-                    color: avgWinRate >= 50 ? Colors.success : Colors.warning,
-                    fontSize: 18,
-                    fontWeight: "800",
-                  }}
-                >
-                  {totalTrades > 0 ? `${avgWinRate.toFixed(1)}%` : "—"}
-                </Text>
+                (() => {
+                  // Bug B: read from rpc_get_portfolio_stats (same source as the
+                  // Performance section), not from per-agent avg (which is 0%
+                  // because agent rows aren't kept in sync until next trade).
+                  const wr = stats?.winRate ?? 0;
+                  const hasTrades = (stats?.totalTrades ?? 0) > 0;
+                  return (
+                    <Text
+                      style={{
+                        color: wr >= 50 ? Colors.success : Colors.warning,
+                        fontSize: 18,
+                        fontWeight: "800",
+                      }}
+                    >
+                      {hasTrades ? `${wr.toFixed(1)}%` : "—"}
+                    </Text>
+                  );
+                })()
               }
               icon="trophy-outline"
               iconColor={Colors.gold}
