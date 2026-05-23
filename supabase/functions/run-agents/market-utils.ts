@@ -103,3 +103,46 @@ export function periodHigh(values: number[], period: number): number {
   const slice = values.slice(-Math.min(period, values.length));
   return Math.max(...slice);
 }
+
+/**
+ * Average True Range over `period` bars.
+ * Returns a $-denominated measure of recent price range volatility.
+ */
+export function calculateATR(
+  highs: number[],
+  lows: number[],
+  closes: number[],
+  period = 14
+): number {
+  const n = Math.min(highs.length, lows.length, closes.length);
+  if (n < period + 1) return 0;
+  const trs: number[] = [];
+  for (let i = n - period; i < n; i++) {
+    const prevClose = closes[i - 1];
+    const tr = Math.max(
+      highs[i] - lows[i],
+      Math.abs(highs[i] - prevClose),
+      Math.abs(lows[i] - prevClose),
+    );
+    trs.push(tr);
+  }
+  return trs.reduce((a, b) => a + b, 0) / trs.length;
+}
+
+/** % distance from the highest close in the last `period` bars (negative = below high) */
+export function distanceFromHighPct(closes: number[], period: number): number {
+  if (closes.length === 0) return 0;
+  const slice = closes.slice(-Math.min(period, closes.length));
+  const hi = Math.max(...slice);
+  const cur = closes[closes.length - 1];
+  return hi > 0 ? ((cur - hi) / hi) * 100 : 0;
+}
+
+/** % distance from the lowest close in the last `period` bars (positive = above low) */
+export function distanceFromLowPct(closes: number[], period: number): number {
+  if (closes.length === 0) return 0;
+  const slice = closes.slice(-Math.min(period, closes.length));
+  const lo = Math.min(...slice);
+  const cur = closes[closes.length - 1];
+  return lo > 0 ? ((cur - lo) / lo) * 100 : 0;
+}

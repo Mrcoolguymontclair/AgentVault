@@ -4,6 +4,52 @@ All notable changes to this project are documented here. Newest entries at the t
 
 ---
 
+## [2026-05-23] — COMPLETE STRATEGY OVERHAUL — Long-only + exit engine
+
+After one month live with only News Trader profitable, all 8 strategies were
+redesigned around position management instead of entry signals. The system now
+runs an **exit engine** on every cron tick *before* any entry evaluation —
+stop-loss, take-profit and time-stop are now first-class signals that bypass
+the daily-entry-limit and AI confirmation.
+
+### Global rules (apply to every long entry)
+- Minimum price **$20** (was $15).
+- Minimum 20d average volume **1M shares** (was 500K).
+- Max **3** open positions per agent (was 5).
+- Max **25%** of budget per position (was 40%).
+- AI confidence floor **0.70** (was 0.65) — **no fallbacks**: a Groq failure now skips the trade.
+- **All short-selling removed** — every strategy is long-only.
+
+### Exit engine (`managePositions` in `strategies.ts`, runs first in `runAgent`)
+- Default thresholds: stop -7%, take-profit +12%, time-stop 10d with <2% gain.
+- News Trader override: stop -5%, take-profit +8%, time-stop 3d.
+- Smart DCA override: take-profit +15%, no stop, no time-stop.
+- Exit signals carry `isExit=true` → bypass daily-entry-limit, 25%/3-position caps and AI confirmation.
+
+### Per-strategy redesigns (`strategies.ts`)
+- **Trend Rider (momentum_rider)**: most-actives, price > 20d SMA, positive slope, vol ≥ 1.0× avg, RSI 40-65, NOT up >4% today.
+- **Bargain Hunter (mean_reversion)**: top-losers, down 3-8% today (not crashes), RSI < 35, 50d SMA still rising.
+- **News Trader (news_trader)**: sentiment threshold raised to 0.5, long-only buys only, tighter exits via the exit engine. Quality filter loosened to $20 / 500K vol (events justify lower volume floors).
+- **Blind Quant (blind_quant)**: now sends **12 anonymized features** to Groq (1d/5d/20d returns, vol ratio, RSI, BB position, volatility, SMA slope, 52w-high/low %, ATR) + SPY 1d change as market regime. Pre-filters to top 5 candidates by heuristic score.
+- **Smart DCA (dca_plus)**: limited to SPY / QQQ / VTI. Once-per-day-per-symbol gate via `agentLastBuyAt`. Tiered sizing: 3-5% dip → 10% of budget, 5-7% → 20%, 7%+ → 30%. Take-profit +15%, no stop.
+- **Prediction Pro (prediction_arb)**: edge ≥ 10% AND confidence ≥ 0.75. Size scales 15% at conf 0.75 → 25% at conf 0.90. Long-only.
+- **Your Rules (custom)**: all global rules apply. Long-only signals only.
+- **Strategy Lab (strategy_lab)**: 4 PM time gate already removed earlier — bootstrap ruleset rewritten to enforce $20/1M, RSI 40-65, long-only.
+
+### Touched files
+- `supabase/functions/run-agents/index.ts` — rewrote `runAgent` to run exit engine first, extracted `executeSignal()`, removed all short-tracking branches, enforced new constants.
+- `supabase/functions/run-agents/strategies.ts` — full rewrite. Centralized exit engine via `managePositions`. Long-only signatures.
+- `supabase/functions/run-agents/groq.ts` — `confirmTrade` no longer auto-approves on Groq failure (returns execute=false). `blindQuantDecision` accepts 12-feature `AnonAsset` + `spyChange1dPct`, prompt re-written long-only.
+- `supabase/functions/run-agents/market-utils.ts` — added `calculateATR`, `distanceFromHighPct`, `distanceFromLowPct`.
+- `supabase/functions/run-agents/types.ts` — replaced `isShort` with `isExit` on `TradeSignal`.
+
+### Deployment steps
+1. **Redeploy edge function** (required): `supabase functions deploy run-agents --no-verify-jwt`
+2. **Close existing short positions immediately**: until the redeploy lands, any pre-existing short positions on Alpaca remain open. Manually flatten them in the Alpaca dashboard, or invoke the edge function with `force=true` to let `managePositions` see them as anomalous (it won't — the new code ignores negative quantities entirely, so manual flatten is required).
+3. No DB migration required.
+
+---
+
 ## [2026-05-23] — Follow-up Critical Dashboard Fixes (Bugs A–C)
 
 ### Bug A — Portfolio value wrong on first load ($174.52 vs $5,174.52)

@@ -2,9 +2,18 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { isMarketOpen } from "./market-utils.ts";
 import { confirmTrade } from "./groq.ts";
 import { placeOrder, getPositions, setAlpacaKeys, clearAlpacaKeys } from "./alpaca.ts";
-import { runStrategy, clearMarketCache, getLastStrategyDiagnostics } from "./strategies.ts";
+import {
+  runStrategy,
+  managePositions,
+  clearMarketCache,
+  getLastStrategyDiagnostics,
+  MAX_OPEN_POSITIONS,
+  MAX_POSITION_PCT,
+  AI_CONFIDENCE_FLOOR,
+  MIN_PRICE,
+} from "./strategies.ts";
 import { initTracker, setCurrentAgent, setCustomKeys, type CustomKey } from "./groq-tracker.ts";
-import type { DbAgent, ExecutionResult, AgentLogInsert } from "./types.ts";
+import type { DbAgent, ExecutionResult, AgentLogInsert, TradeSignal } from "./types.ts";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -14,6 +23,10 @@ const CORS = {
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SUPABASE_SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+
+// Daily limits — entries only. Exits always go through.
+const DAILY_ENTRY_LIMIT = 2;
+const DAILY_LOSS_LIMIT_PCT = 0.03;
 
 Deno.serve(async (req) => {
   const rawBody = await req.text().catch(() => "");
@@ -29,7 +42,6 @@ Deno.serve(async (req) => {
       force?: boolean;
     };
 
-    // Market hours gate (bypass with force=true for testing)
     if (!body.force && !isMarketOpen()) {
       return json({ ok: true, marketClosed: true, message: "Market is closed — no agents run", results: [] });
     }
@@ -38,8 +50,6 @@ Deno.serve(async (req) => {
       auth: { persistSession: false },
     });
 
-    // Fetch agents. When force=true with a specific agent_id, bypass the
-    // status=active filter so "Run Now" works on any agent (backtesting, paused, etc.)
     let query = supabase.from("agents").select("*");
     if (body.agent_id) {
       query = (query as any).eq("id", body.agent_id);
@@ -54,17 +64,11 @@ Deno.serve(async (req) => {
       return json({ ok: true, message: "No active agents to run", count: 0, results: [] });
     }
 
-    // ── Init Groq usage tracker ───────────────────────────────
-    // Load today's token count so the tracker knows the daily budget remaining
     const { data: dailyTokenData } = await supabase.rpc("rpc_get_groq_usage_today");
     initTracker(supabase, Number(dailyTokenData ?? 0));
 
-    // ── Clear market-data cache for this run ──────────────────
     clearMarketCache();
 
-    // ── Prioritise agents (least-recently-traded first) ───────
-    // Agents that just traded are less likely to have a new signal;
-    // check them last so earlier agents get the full token budget.
     const fifteenMinsAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
     const { data: recentTradeRows } = await supabase
       .from("trades")
@@ -76,17 +80,15 @@ Deno.serve(async (req) => {
     const sortedAgents = [...(agents as DbAgent[])].sort((a, b) => {
       const aR = recentlyTraded.has(a.id) ? 1 : 0;
       const bR = recentlyTraded.has(b.id) ? 1 : 0;
-      return aR - bR; // agents that just traded go to the end
+      return aR - bR;
     });
 
-    // ── Run agents sequentially with inter-agent spacing ──────
     const results: ExecutionResult[] = [];
     for (let i = 0; i < sortedAgents.length; i++) {
-      if (i > 0) await new Promise((r) => setTimeout(r, 500)); // spread load
+      if (i > 0) await new Promise((r) => setTimeout(r, 500));
 
       const agent = sortedAgents[i];
 
-      // ── Configure Alpaca keys per agent mode ──────────────────
       if (agent.mode === "live") {
         try {
           const { data: alpacaKeys } = await supabase.rpc("rpc_get_user_alpaca_keys", {
@@ -95,7 +97,6 @@ Deno.serve(async (req) => {
           if (alpacaKeys?.key_id && alpacaKeys?.key_secret) {
             setAlpacaKeys(alpacaKeys.key_id, alpacaKeys.key_secret, true);
           } else {
-            // No keys — pause the agent and skip
             console.warn(`[run-agents] Live agent ${agent.id} has no Alpaca keys — pausing`);
             await supabase.from("agents").update({ status: "paused", updated_at: new Date().toISOString() }).eq("id", agent.id);
             results.push({ agentId: agent.id, agentName: agent.name, success: false, skipped: true, skipReason: "No Alpaca keys configured for live trading" });
@@ -107,13 +108,11 @@ Deno.serve(async (req) => {
           continue;
         }
       } else {
-        clearAlpacaKeys(); // Use app's default paper keys
+        clearAlpacaKeys();
       }
 
-      // Get Alpaca positions for this agent's key set
       const alpacaPositions = await getPositions();
 
-      // Load this agent's custom AI keys (service-role only RPC returns unmasked keys)
       try {
         const { data: customKeyData } = await supabase.rpc("rpc_get_key_for_agent", {
           p_user_id: agent.user_id,
@@ -153,16 +152,16 @@ async function runAgent(
     const config = agent.config ?? {};
     const budget = Number(agent.budget ?? 1000);
 
-    // ── Daily loss limit check (5% of budget) ───────────────
+    // ── Daily loss limit ────────────────────────────────────
     const today = new Date().toISOString().split("T")[0];
     const { data: todayTrades } = await supabase
       .from("trades")
-      .select("pnl")
+      .select("pnl, side, symbol, executed_at")
       .eq("agent_id", agent.id)
       .gte("executed_at", `${today}T00:00:00Z`);
 
     const dailyPnl = (todayTrades ?? []).reduce((s, t) => s + Number(t.pnl), 0);
-    const dailyLossLimit = budget * 0.03; // 3% daily loss limit
+    const dailyLossLimit = budget * DAILY_LOSS_LIMIT_PCT;
     if (dailyPnl <= -dailyLossLimit) {
       await logExecution(supabase, agent, {
         action: "skipped",
@@ -171,26 +170,17 @@ async function runAgent(
       return { ...base, skipped: true, skipReason: `Daily loss limit hit ($${Math.abs(dailyPnl).toFixed(2)} — 3% of budget)` };
     }
 
-    // ── Daily trade limit (max 2 trades per agent per day) ────
-    const dailyTradeCount = (todayTrades ?? []).length;
-    if (dailyTradeCount >= 2) {
-      await logExecution(supabase, agent, {
-        action: "skipped",
-        skip_reason: `Daily trade limit reached (${dailyTradeCount}/2 trades today)`,
-      });
-      return { ...base, skipped: true, skipReason: `Daily trade limit reached (${dailyTradeCount}/2 trades today)` };
-    }
-
-    // ── Calculate agent's virtual positions from DB ──────────
+    // ── Calculate agent's virtual positions (longs only) ────
     const { data: allTrades } = await supabase
       .from("trades")
       .select("symbol, side, quantity, price, executed_at")
       .eq("agent_id", agent.id)
       .order("executed_at", { ascending: true });
 
-    const agentPositions: Record<string, number> = {}; // symbol → net qty held
-    const agentAvgCost: Record<string, number> = {}; // symbol → avg buy price
-    const agentPositionOpenedAt: Record<string, string> = {}; // symbol → when long position was first opened
+    const agentPositions: Record<string, number> = {};
+    const agentAvgCost: Record<string, number> = {};
+    const agentPositionOpenedAt: Record<string, string> = {};
+    const agentLastBuyAt: Record<string, string> = {};
 
     for (const t of allTrades ?? []) {
       const tradeQty = Number(t.quantity);
@@ -198,42 +188,25 @@ async function runAgent(
       const prevQty = agentPositions[sym] ?? 0;
 
       if (t.side === "buy") {
-        if (prevQty < 0) {
-          // Covering a short — move position back toward 0
-          agentPositions[sym] = prevQty + tradeQty;
-          if ((agentPositions[sym] ?? 0) >= 0) {
-            delete agentPositionOpenedAt[sym]; // short fully closed
-          }
-        } else {
-          // Long buy — update avg cost
-          const prevAvg = agentAvgCost[sym] ?? 0;
-          agentAvgCost[sym] = prevQty > 0
-            ? (prevAvg * prevQty + Number(t.price) * tradeQty) / (prevQty + tradeQty)
-            : Number(t.price);
-          agentPositions[sym] = prevQty + tradeQty;
-          // Record when this long position was first opened
-          if (prevQty === 0 && !agentPositionOpenedAt[sym]) {
-            agentPositionOpenedAt[sym] = t.executed_at;
-          }
+        const prevAvg = agentAvgCost[sym] ?? 0;
+        agentAvgCost[sym] = prevQty > 0
+          ? (prevAvg * prevQty + Number(t.price) * tradeQty) / (prevQty + tradeQty)
+          : Number(t.price);
+        agentPositions[sym] = prevQty + tradeQty;
+        if (prevQty === 0 && !agentPositionOpenedAt[sym]) {
+          agentPositionOpenedAt[sym] = t.executed_at;
         }
+        agentLastBuyAt[sym] = t.executed_at;
       } else {
-        // Sell
-        if (prevQty > 0) {
-          // Closing a long
-          agentPositions[sym] = Math.max(0, prevQty - tradeQty);
-          if (agentPositions[sym] === 0) {
-            delete agentPositionOpenedAt[sym]; // position fully closed
-          }
-        } else {
-          // Opening or adding to a short — track the short entry price
-          agentAvgCost[sym] = Number(t.price);
-          agentPositions[sym] = prevQty - tradeQty; // goes negative
+        // Sell — long-close only (shorts disabled).
+        agentPositions[sym] = Math.max(0, prevQty - tradeQty);
+        if (agentPositions[sym] === 0) {
+          delete agentPositionOpenedAt[sym];
         }
       }
     }
 
-    // ── Available budget ─────────────────────────────────────
-    // Only count positive (long) positions — shorts bring in cash, don't consume budget
+    // ── Available budget ────────────────────────────────────
     const invested = Object.entries(agentPositions).reduce((sum, [sym, qty]) => {
       if (qty <= 0) return sum;
       const price = alpacaPositions[sym]?.avg_entry_price ?? agentAvgCost[sym] ?? 0;
@@ -241,25 +214,44 @@ async function runAgent(
     }, 0);
     const availableBudget = Math.max(0, budget - invested);
 
-    // ── Consecutive no-signal detection ──────────────────────
-    // If the last 3 runs all had no signal, temporarily loosen thresholds by 10%
-    const { data: recentLogs } = await supabase
-      .from("agent_logs")
-      .select("signal_detected")
-      .eq("agent_id", agent.id)
-      .order("timestamp", { ascending: false })
-      .limit(3);
-    const recentLogArr = recentLogs ?? [];
-    const consecutiveNoSignal =
-      recentLogArr.length >= 3 &&
-      recentLogArr.every((log: any) => !log.signal_detected);
+    // ─────────────────────────────────────────────────────────
+    // STEP 1: EXIT ENGINE — runs BEFORE strategy evaluation.
+    // Stop-loss / take-profit / time-stop are more important than entries.
+    // Exit signals bypass daily-entry-limit and AI confirmation.
+    // ─────────────────────────────────────────────────────────
+    const exitSignal = await managePositions(
+      agent.strategy,
+      agentPositions,
+      agentAvgCost,
+      agentPositionOpenedAt,
+    );
 
-    const enrichedConfig = consecutiveNoSignal
-      ? { ...config, _loosen: 1 }
-      : config;
+    if (exitSignal) {
+      const result = await executeSignal(supabase, agent, exitSignal, agentPositions, agentAvgCost, alpacaPositions, budget, availableBudget);
+      return result;
+    }
 
-    // ── Run strategy ─────────────────────────────────────────
-    const signal = await runStrategy(agent.strategy, enrichedConfig, agentPositions, agentAvgCost, agentPositionOpenedAt);
+    // ─────────────────────────────────────────────────────────
+    // STEP 2: ENTRY EVALUATION — apply daily-entry-limit and run strategy.
+    // ─────────────────────────────────────────────────────────
+    const entryCountToday = (todayTrades ?? []).filter((t: any) => t.side === "buy").length;
+    if (entryCountToday >= DAILY_ENTRY_LIMIT) {
+      await logExecution(supabase, agent, {
+        action: "skipped",
+        skip_reason: `Daily entry limit reached (${entryCountToday}/${DAILY_ENTRY_LIMIT} buys today)`,
+      });
+      return { ...base, skipped: true, skipReason: `Daily entry limit reached (${entryCountToday}/${DAILY_ENTRY_LIMIT} buys today)` };
+    }
+
+    // ── Run strategy ────────────────────────────────────────
+    const signal = await runStrategy(
+      agent.strategy,
+      config,
+      agentPositions,
+      agentAvgCost,
+      agentPositionOpenedAt,
+      agentLastBuyAt,
+    );
     if (!signal) {
       await logExecution(supabase, agent, {
         action: "skipped",
@@ -269,305 +261,8 @@ async function runAgent(
       return { ...base, skipped: true, skipReason: "No signal generated" };
     }
 
-    // ── Resolve notional → dollar amount ─────────────────────
-    // Long buy:      notional = % of budget
-    // Short entry:   notional = % of budget (isShort=true, side=sell)
-    // Long sell:     notional = total $ of position to close
-    // Short cover:   notional = total $ of short to cover (isShort=true, side=buy)
-    const isShortEntry = signal.side === "sell" && signal.isShort === true;
-    const isShortCover = signal.side === "buy"  && signal.isShort === true;
-    const isLongBuy    = signal.side === "buy"  && !signal.isShort;
-
-    let dollarAmount: number;
-    if (isLongBuy || isShortEntry) {
-      // notional is a % of budget
-      dollarAmount = Math.min(budget * (signal.notional / 100), availableBudget);
-    } else {
-      // Long sell or short cover — notional is already dollars
-      dollarAmount = signal.notional;
-    }
-
-    // Short covers are always allowed even when available budget < 1
-    if (dollarAmount < 1 && !isShortCover) {
-      await logExecution(supabase, agent, { action: "skipped", skip_reason: "Trade size too small", signal_detected: true, signal_symbol: signal.symbol, signal_side: signal.side });
-      return { ...base, skipped: true, skipReason: "Trade size too small" };
-    }
-
-    // ── Budget check (skip for short covers — they return cash) ─
-    if (availableBudget < 1 && !isShortCover) {
-      await logExecution(supabase, agent, { action: "skipped", skip_reason: "Budget fully deployed" });
-      return { ...base, skipped: true, skipReason: "Budget fully deployed" };
-    }
-
-    // ── Portfolio concentration check (40% max per symbol, longs only) ──
-    if (isLongBuy) {
-      const currentPositionValue = (agentPositions[signal.symbol] ?? 0) * (agentAvgCost[signal.symbol] ?? signal.marketData.currentPrice);
-      const projectedValue = currentPositionValue + dollarAmount;
-      if (projectedValue > budget * 0.40) {
-        const skipReason = `Would exceed 40% portfolio concentration in ${signal.symbol}`;
-        await logExecution(supabase, agent, { action: "skipped", skip_reason: skipReason, signal_detected: true, signal_symbol: signal.symbol, signal_side: signal.side });
-        return { ...base, skipped: true, skipReason };
-      }
-    }
-
-    // ── Bug 8: Max-positions cap (5 per agent for NEW symbols only) ───────────
-    // Counts open longs + open shorts. Adding to an existing position is allowed.
-    if (isLongBuy || isShortEntry) {
-      const openPositions = Object.entries(agentPositions).filter(
-        ([_sym, q]) => Math.abs(q) > 0.00001,
-      );
-      const alreadyHeld = (agentPositions[signal.symbol] ?? 0) !== 0;
-      if (!alreadyHeld && openPositions.length >= 5) {
-        const skipReason = `Max positions reached (${openPositions.length}/5) — skipping new ${signal.symbol}`;
-        await logExecution(supabase, agent, { action: "skipped", skip_reason: skipReason, signal_detected: true, signal_symbol: signal.symbol, signal_side: signal.side });
-        return { ...base, skipped: true, skipReason };
-      }
-    }
-
-    // ── Bug 7: Hard price floor — reject penny stocks even if a strategy
-    // somehow generates a sub-$15 signal (defense in depth alongside the
-    // per-strategy isQualityStock filter in strategies.ts).
-    if (isLongBuy || isShortEntry) {
-      if (signal.marketData.currentPrice < 15) {
-        const skipReason = `[FILTER] ${signal.symbol} rejected: price $${signal.marketData.currentPrice.toFixed(2)} < $15 minimum`;
-        console.log(skipReason);
-        await logExecution(supabase, agent, { action: "skipped", skip_reason: skipReason, signal_detected: true, signal_symbol: signal.symbol, signal_side: signal.side });
-        return { ...base, skipped: true, skipReason };
-      }
-    }
-
-    // ── AI confirmation ───────────────────────────────────────
-    // Some strategies (News Trader, Blind Quant) already made the Groq decision
-    // internally — skip confirmTrade and use their result directly.
-    const aiThreshold = 0.65; // require confident AI; never execute on weak or fallback signals
-    let ai: { execute: boolean; reasoning: string; confidence: number };
-
-    if (signal.skipAiConfirmation) {
-      ai = {
-        execute:    signal.strategyConfidence >= aiThreshold,
-        reasoning:  signal.reason,
-        confidence: signal.strategyConfidence,
-      };
-    } else {
-      ai = await confirmTrade({
-        strategy: agent.strategy,
-        symbol:   signal.symbol,
-        side:     signal.side,
-        reason:   signal.reason,
-        ...signal.marketData,
-      });
-    }
-
-    // If AI is unavailable (fallback), do NOT execute — skip for safety
-    const aiUnavailable = /unavailable|fallback|AI unavailable/i.test(ai.reasoning);
-    if (aiUnavailable) {
-      const skipReason = "AI unavailable — trade skipped for safety";
-      await logExecution(supabase, agent, {
-        action: "skipped",
-        skip_reason: skipReason,
-        signal_detected: true,
-        signal_symbol: signal.symbol,
-        signal_side: signal.side,
-        ai_reasoning: ai.reasoning,
-        ai_confidence: ai.confidence,
-      });
-      return { ...base, skipped: true, skipReason };
-    }
-
-    if (!ai.execute || ai.confidence < aiThreshold) {
-      const skipReason = `AI rejected (confidence ${(ai.confidence * 100).toFixed(0)}%): ${ai.reasoning}`;
-      await logExecution(supabase, agent, {
-        action: "skipped",
-        skip_reason: skipReason,
-        signal_detected: true,
-        signal_symbol: signal.symbol,
-        signal_side: signal.side,
-        ai_reasoning: ai.reasoning,
-        ai_confidence: ai.confidence,
-      });
-      return { ...base, skipped: true, skipReason };
-    }
-
-    // ── Calculate quantity ────────────────────────────────────
-    const currentPrice = signal.marketData.currentPrice;
-    const rawQty = dollarAmount / currentPrice;
-    const currentHeld = agentPositions[signal.symbol] ?? 0;
-
-    let qty: number;
-    if (isShortEntry) {
-      // Sell shares we don't own — no held-position cap
-      qty = Math.floor(rawQty);
-    } else if (isShortCover) {
-      // Buy back up to the full short position size
-      qty = Math.min(Math.floor(rawQty), Math.abs(Math.floor(currentHeld)));
-    } else if (signal.side === "sell") {
-      // Regular sell — cap at long position size
-      qty = Math.min(Math.floor(rawQty), Math.floor(Math.max(0, currentHeld)));
-    } else {
-      // Regular long buy
-      qty = Math.floor(rawQty);
-    }
-
-    if (qty <= 0) {
-      await logExecution(supabase, agent, { action: "skipped", skip_reason: "Qty rounds to 0", signal_detected: true, signal_symbol: signal.symbol, signal_side: signal.side });
-      return { ...base, skipped: true, skipReason: "Qty rounds to 0" };
-    }
-
-    // ── Place Alpaca paper order ──────────────────────────────
-    let fillPrice = currentPrice;
-    let alpacaOrderId: string | null = null;
-    let orderStatus = "simulated";
-    try {
-      const order = await placeOrder(signal.symbol, qty, signal.side);
-      // filled_avg_price may be null until filled; fall back to current price
-      fillPrice = Number(order.filled_avg_price ?? currentPrice);
-      alpacaOrderId = order.id ?? null;
-      orderStatus = order.status ?? "filled";
-      console.log(`[order] ${signal.symbol} ${signal.side} orderId=${alpacaOrderId} status=${orderStatus}`);
-    } catch (err) {
-      console.error("Alpaca order error:", err);
-      // Continue to log a simulated trade even if Alpaca rejects
-      // (Alpaca paper API sometimes rejects outside-hours orders)
-    }
-
-    // ── P&L for this trade ────────────────────────────────────
-    // Bug 3: avgCost was sometimes 0 (no prior buy in DB → e.g. position was
-    // opened on Alpaca but trade insert failed before). Fall back to Alpaca's
-    // own avg_entry_price for the position so we still record real P&L.
-    let tradePnl = 0;
-    const alpacaAvgPrice = Number(alpacaPositions[signal.symbol]?.avg_entry_price ?? 0);
-
-    if (signal.side === "sell" && !isShortEntry) {
-      // Closing a long position
-      let avgCost = agentAvgCost[signal.symbol] ?? 0;
-      if (avgCost <= 0 && alpacaAvgPrice > 0) {
-        console.log(`[pnl] SELL ${signal.symbol}: local avgCost missing — using Alpaca avg_entry_price $${alpacaAvgPrice.toFixed(2)}`);
-        avgCost = alpacaAvgPrice;
-      }
-      if (avgCost > 0) {
-        tradePnl = (fillPrice - avgCost) * qty;
-        console.log(`[pnl] SELL ${signal.symbol}: ($${fillPrice.toFixed(2)} - $${avgCost.toFixed(2)}) × ${qty} = $${tradePnl.toFixed(2)}`);
-      } else {
-        console.error(`[pnl] SELL ${signal.symbol}: avg cost missing in BOTH local AND Alpaca — pnl recorded as $0. agentAvgCost=${JSON.stringify(agentAvgCost[signal.symbol])} alpacaPos=${JSON.stringify(alpacaPositions[signal.symbol])}`);
-      }
-    } else if (isShortCover) {
-      // Covering a short: profit = (short entry price − cover price) × qty
-      let shortEntryPrice = agentAvgCost[signal.symbol] ?? 0;
-      if (shortEntryPrice <= 0 && alpacaAvgPrice > 0) {
-        console.log(`[pnl] SHORT COVER ${signal.symbol}: local entry missing — using Alpaca avg_entry_price $${alpacaAvgPrice.toFixed(2)}`);
-        shortEntryPrice = alpacaAvgPrice;
-      }
-      if (shortEntryPrice > 0) {
-        tradePnl = (shortEntryPrice - fillPrice) * qty;
-        console.log(`[pnl] SHORT COVER ${signal.symbol}: ($${shortEntryPrice.toFixed(2)} - $${fillPrice.toFixed(2)}) × ${qty} = $${tradePnl.toFixed(2)}`);
-      } else {
-        console.error(`[pnl] SHORT COVER ${signal.symbol}: entry price missing in BOTH local AND Alpaca — pnl recorded as $0`);
-      }
-    }
-    // Short entry (isShortEntry) and long buys: PnL = 0 (realized later)
-
-    // ── Log trade to DB ───────────────────────────────────────
-    // Try with order-tracking columns first; fall back to base columns if
-    // migration 014 hasn't been applied yet (avoids column-not-found crash).
-    const baseTradeRow = {
-      agent_id:    agent.id,
-      user_id:     agent.user_id,
-      symbol:      signal.symbol,
-      side:        signal.side,
-      quantity:    qty,
-      price:       fillPrice,
-      pnl:         tradePnl,
-      executed_at: new Date().toISOString(),
-    };
-
-    const { error: tradeErr } = await supabase.from("trades").insert(
-      alpacaOrderId
-        ? { ...baseTradeRow, alpaca_order_id: alpacaOrderId, order_status: orderStatus }
-        : baseTradeRow
-    );
-
-    if (tradeErr) {
-      // Column doesn't exist yet — retry without order tracking fields
-      if (tradeErr.message.includes("alpaca_order_id") || tradeErr.message.includes("order_status")) {
-        console.warn("[trades.insert] Retrying without order tracking cols (run migration 014):", tradeErr.message);
-        const { error: retryErr } = await supabase.from("trades").insert(baseTradeRow);
-        if (retryErr) throw new Error(`Trade insert failed: ${retryErr.message}`);
-      } else {
-        throw new Error(`Trade insert failed: ${tradeErr.message}`);
-      }
-    }
-
-    // ── Update agent stats (RPC preferred; inline fallback if 014 not run) ───
-    const { error: statsRpcErr } = await supabase.rpc("rpc_update_agent_stats", { p_agent_id: agent.id });
-    if (statsRpcErr) {
-      console.warn("[rpc_update_agent_stats] RPC missing — using inline fallback (run migration 014):", statsRpcErr.message);
-      const newPnl    = Number(agent.pnl) + tradePnl;
-      const newPnlPct = budget > 0 ? (newPnl / budget) * 100 : 0;
-      const newTrades = agent.trades_count + 1;
-      const { data: sellTrades } = await supabase
-        .from("trades").select("pnl").eq("agent_id", agent.id).eq("side", "sell");
-      const sells   = sellTrades ?? [];
-      const winners = sells.filter((t) => Number(t.pnl) > 0).length;
-      const newWinRate = sells.length > 0 ? (winners / sells.length) * 100 : 0;
-      await supabase.from("agents").update({
-        pnl: newPnl, pnl_pct: newPnlPct, trades_count: newTrades,
-        win_rate: newWinRate, updated_at: new Date().toISOString(),
-      }).eq("id", agent.id);
-    }
-
-    // ── Portfolio snapshot (upsert today's value) ─────────────
-    // Recalculate cumulative PnL for this agent for the snapshot
-    const { data: allAgentTrades } = await supabase
-      .from("trades")
-      .select("pnl")
-      .eq("agent_id", agent.id);
-    const cumulativePnl = (allAgentTrades ?? []).reduce((s, t) => s + Number(t.pnl ?? 0), 0);
-    const portfolioValue = budget + cumulativePnl;
-    const snapshotPnlPct = budget > 0 ? (cumulativePnl / budget) * 100 : 0;
-
-    await supabase.from("portfolio_snapshots").upsert(
-      {
-        user_id: agent.user_id,
-        agent_id: agent.id,
-        value: portfolioValue,
-        pnl_pct: snapshotPnlPct,
-        snapshot_date: today,
-      },
-      { onConflict: "user_id,agent_id,snapshot_date" }
-    );
-
-    // ── Update profile balance (10000 + total realized P&L) ───────────────
-    // Fire-and-forget: keeps profiles.balance in sync so the dashboard shows
-    // the correct portfolio value without needing a manual refresh.
-    supabase.rpc("rpc_calculate_portfolio_value", { p_user_id: agent.user_id }).catch((err) => {
-      console.warn("[rpc_calculate_portfolio_value] Non-fatal error:", err);
-    });
-
-    const executionResult: ExecutionResult = {
-      ...base,
-      success: true,
-      symbol: signal.symbol,
-      side: signal.side,
-      qty,
-      price: fillPrice,
-      pnl: tradePnl,
-      aiReasoning: ai.reasoning,
-    };
-
-    await logExecution(supabase, agent, {
-      action: "traded",
-      signal_detected: true,
-      signal_symbol: signal.symbol,
-      signal_side: signal.side,
-      ai_reasoning: ai.reasoning,
-      ai_confidence: ai.confidence,
-      trade_symbol: signal.symbol,
-      trade_qty: qty,
-      trade_price: fillPrice,
-      trade_pnl: tradePnl,
-    });
-
-    return executionResult;
+    const result = await executeSignal(supabase, agent, signal, agentPositions, agentAvgCost, alpacaPositions, budget, availableBudget);
+    return result;
   } catch (err) {
     console.error(`Agent ${agent.id} error:`, err);
     await logExecution(supabase, agent, { action: "error", skip_reason: String(err) });
@@ -576,7 +271,256 @@ async function runAgent(
 }
 
 // ─────────────────────────────────────────────────────────────
-// Agent execution logger
+// Execute a single TradeSignal (entry or exit).
+// Returns an ExecutionResult.
+// ─────────────────────────────────────────────────────────────
+async function executeSignal(
+  supabase: ReturnType<typeof createClient>,
+  agent: DbAgent,
+  signal: TradeSignal,
+  agentPositions: Record<string, number>,
+  agentAvgCost: Record<string, number>,
+  alpacaPositions: Record<string, { qty: number; avg_entry_price: number }>,
+  budget: number,
+  availableBudget: number,
+): Promise<ExecutionResult> {
+  const base: ExecutionResult = { agentId: agent.id, agentName: agent.name, success: false };
+
+  const isExit = signal.isExit === true;
+  const isLongBuy = signal.side === "buy";
+
+  // ── Resolve notional → dollar amount ─────────────────────
+  // Long buy:  notional = % of budget
+  // Sell:      notional = $ value to close
+  let dollarAmount: number;
+  if (isLongBuy) {
+    dollarAmount = Math.min(budget * (signal.notional / 100), availableBudget);
+  } else {
+    dollarAmount = signal.notional;
+  }
+
+  if (dollarAmount < 1) {
+    await logExecution(supabase, agent, { action: "skipped", skip_reason: "Trade size too small", signal_detected: true, signal_symbol: signal.symbol, signal_side: signal.side });
+    return { ...base, skipped: true, skipReason: "Trade size too small" };
+  }
+
+  // ── Entry gates (skipped for exits) ──────────────────────
+  if (isLongBuy && !isExit) {
+    if (availableBudget < 1) {
+      await logExecution(supabase, agent, { action: "skipped", skip_reason: "Budget fully deployed" });
+      return { ...base, skipped: true, skipReason: "Budget fully deployed" };
+    }
+
+    // Hard price floor
+    if (signal.marketData.currentPrice < MIN_PRICE) {
+      const skipReason = `[FILTER] ${signal.symbol} rejected: price $${signal.marketData.currentPrice.toFixed(2)} < $${MIN_PRICE} minimum`;
+      console.log(skipReason);
+      await logExecution(supabase, agent, { action: "skipped", skip_reason: skipReason, signal_detected: true, signal_symbol: signal.symbol, signal_side: signal.side });
+      return { ...base, skipped: true, skipReason };
+    }
+
+    // 25% concentration cap
+    const currentPositionValue = (agentPositions[signal.symbol] ?? 0) * (signal.marketData.currentPrice);
+    const projectedValue = currentPositionValue + dollarAmount;
+    if (projectedValue > budget * MAX_POSITION_PCT) {
+      // Reduce dollarAmount to fit within the cap
+      const allowed = budget * MAX_POSITION_PCT - currentPositionValue;
+      if (allowed < 1) {
+        const skipReason = `Already at ${(MAX_POSITION_PCT * 100).toFixed(0)}% concentration in ${signal.symbol}`;
+        await logExecution(supabase, agent, { action: "skipped", skip_reason: skipReason, signal_detected: true, signal_symbol: signal.symbol, signal_side: signal.side });
+        return { ...base, skipped: true, skipReason };
+      }
+      dollarAmount = allowed;
+    }
+
+    // Max open positions (counts existing longs)
+    const openPositions = Object.entries(agentPositions).filter(([, q]) => q > 0.00001);
+    const alreadyHeld = (agentPositions[signal.symbol] ?? 0) > 0;
+    if (!alreadyHeld && openPositions.length >= MAX_OPEN_POSITIONS) {
+      const skipReason = `Max positions reached (${openPositions.length}/${MAX_OPEN_POSITIONS}) — skipping new ${signal.symbol}`;
+      await logExecution(supabase, agent, { action: "skipped", skip_reason: skipReason, signal_detected: true, signal_symbol: signal.symbol, signal_side: signal.side });
+      return { ...base, skipped: true, skipReason };
+    }
+  }
+
+  // ── AI confirmation (skipped for exits and strategies that pre-decided) ─
+  let ai: { execute: boolean; reasoning: string; confidence: number };
+  if (isExit || signal.skipAiConfirmation) {
+    ai = {
+      execute: signal.strategyConfidence >= AI_CONFIDENCE_FLOOR || isExit,
+      reasoning: signal.reason,
+      confidence: signal.strategyConfidence,
+    };
+  } else {
+    ai = await confirmTrade({
+      strategy: agent.strategy,
+      symbol: signal.symbol,
+      side: signal.side,
+      reason: signal.reason,
+      ...signal.marketData,
+    });
+  }
+
+  if (!isExit && (!ai.execute || ai.confidence < AI_CONFIDENCE_FLOOR)) {
+    const skipReason = `AI rejected (confidence ${(ai.confidence * 100).toFixed(0)}%): ${ai.reasoning}`;
+    await logExecution(supabase, agent, {
+      action: "skipped",
+      skip_reason: skipReason,
+      signal_detected: true,
+      signal_symbol: signal.symbol,
+      signal_side: signal.side,
+      ai_reasoning: ai.reasoning,
+      ai_confidence: ai.confidence,
+    });
+    return { ...base, skipped: true, skipReason };
+  }
+
+  // ── Calculate quantity ──────────────────────────────────
+  const currentPrice = signal.marketData.currentPrice;
+  const rawQty = dollarAmount / currentPrice;
+  const currentHeld = agentPositions[signal.symbol] ?? 0;
+
+  let qty: number;
+  if (signal.side === "sell") {
+    qty = Math.min(Math.floor(rawQty), Math.floor(Math.max(0, currentHeld)));
+  } else {
+    qty = Math.floor(rawQty);
+  }
+
+  if (qty <= 0) {
+    await logExecution(supabase, agent, { action: "skipped", skip_reason: "Qty rounds to 0", signal_detected: true, signal_symbol: signal.symbol, signal_side: signal.side });
+    return { ...base, skipped: true, skipReason: "Qty rounds to 0" };
+  }
+
+  // ── Place Alpaca order ──────────────────────────────────
+  let fillPrice = currentPrice;
+  let alpacaOrderId: string | null = null;
+  let orderStatus = "simulated";
+  try {
+    const order = await placeOrder(signal.symbol, qty, signal.side);
+    fillPrice = Number(order.filled_avg_price ?? currentPrice);
+    alpacaOrderId = order.id ?? null;
+    orderStatus = order.status ?? "filled";
+    console.log(`[order] ${signal.symbol} ${signal.side} orderId=${alpacaOrderId} status=${orderStatus}`);
+  } catch (err) {
+    console.error("Alpaca order error:", err);
+  }
+
+  // ── P&L ─────────────────────────────────────────────────
+  let tradePnl = 0;
+  if (signal.side === "sell") {
+    let avgCost = agentAvgCost[signal.symbol] ?? 0;
+    const alpacaAvgPrice = Number(alpacaPositions[signal.symbol]?.avg_entry_price ?? 0);
+    if (avgCost <= 0 && alpacaAvgPrice > 0) {
+      console.log(`[pnl] SELL ${signal.symbol}: local avgCost missing — using Alpaca avg_entry_price $${alpacaAvgPrice.toFixed(2)}`);
+      avgCost = alpacaAvgPrice;
+    }
+    if (avgCost > 0) {
+      tradePnl = (fillPrice - avgCost) * qty;
+      console.log(`[pnl] SELL ${signal.symbol}: ($${fillPrice.toFixed(2)} - $${avgCost.toFixed(2)}) × ${qty} = $${tradePnl.toFixed(2)}`);
+    } else {
+      console.error(`[pnl] SELL ${signal.symbol}: avg cost missing in BOTH local AND Alpaca — pnl recorded as $0`);
+    }
+  }
+
+  // ── Log trade ───────────────────────────────────────────
+  const baseTradeRow = {
+    agent_id: agent.id,
+    user_id: agent.user_id,
+    symbol: signal.symbol,
+    side: signal.side,
+    quantity: qty,
+    price: fillPrice,
+    pnl: tradePnl,
+    executed_at: new Date().toISOString(),
+  };
+
+  const { error: tradeErr } = await supabase.from("trades").insert(
+    alpacaOrderId
+      ? { ...baseTradeRow, alpaca_order_id: alpacaOrderId, order_status: orderStatus }
+      : baseTradeRow
+  );
+
+  if (tradeErr) {
+    if (tradeErr.message.includes("alpaca_order_id") || tradeErr.message.includes("order_status")) {
+      console.warn("[trades.insert] Retrying without order tracking cols:", tradeErr.message);
+      const { error: retryErr } = await supabase.from("trades").insert(baseTradeRow);
+      if (retryErr) throw new Error(`Trade insert failed: ${retryErr.message}`);
+    } else {
+      throw new Error(`Trade insert failed: ${tradeErr.message}`);
+    }
+  }
+
+  // ── Update agent stats ──────────────────────────────────
+  const { error: statsRpcErr } = await supabase.rpc("rpc_update_agent_stats", { p_agent_id: agent.id });
+  if (statsRpcErr) {
+    console.warn("[rpc_update_agent_stats] RPC missing — using inline fallback:", statsRpcErr.message);
+    const newPnl = Number(agent.pnl) + tradePnl;
+    const newPnlPct = budget > 0 ? (newPnl / budget) * 100 : 0;
+    const newTrades = agent.trades_count + 1;
+    const { data: sellTrades } = await supabase
+      .from("trades").select("pnl").eq("agent_id", agent.id).eq("side", "sell");
+    const sells = sellTrades ?? [];
+    const winners = sells.filter((t) => Number(t.pnl) > 0).length;
+    const newWinRate = sells.length > 0 ? (winners / sells.length) * 100 : 0;
+    await supabase.from("agents").update({
+      pnl: newPnl, pnl_pct: newPnlPct, trades_count: newTrades,
+      win_rate: newWinRate, updated_at: new Date().toISOString(),
+    }).eq("id", agent.id);
+  }
+
+  // ── Portfolio snapshot ──────────────────────────────────
+  const today = new Date().toISOString().split("T")[0];
+  const { data: allAgentTrades } = await supabase
+    .from("trades")
+    .select("pnl")
+    .eq("agent_id", agent.id);
+  const cumulativePnl = (allAgentTrades ?? []).reduce((s, t) => s + Number(t.pnl ?? 0), 0);
+  const portfolioValue = budget + cumulativePnl;
+  const snapshotPnlPct = budget > 0 ? (cumulativePnl / budget) * 100 : 0;
+
+  await supabase.from("portfolio_snapshots").upsert(
+    {
+      user_id: agent.user_id,
+      agent_id: agent.id,
+      value: portfolioValue,
+      pnl_pct: snapshotPnlPct,
+      snapshot_date: today,
+    },
+    { onConflict: "user_id,agent_id,snapshot_date" }
+  );
+
+  supabase.rpc("rpc_calculate_portfolio_value", { p_user_id: agent.user_id }).catch((err) => {
+    console.warn("[rpc_calculate_portfolio_value] Non-fatal error:", err);
+  });
+
+  const executionResult: ExecutionResult = {
+    ...base,
+    success: true,
+    symbol: signal.symbol,
+    side: signal.side,
+    qty,
+    price: fillPrice,
+    pnl: tradePnl,
+    aiReasoning: ai.reasoning,
+  };
+
+  await logExecution(supabase, agent, {
+    action: "traded",
+    signal_detected: true,
+    signal_symbol: signal.symbol,
+    signal_side: signal.side,
+    ai_reasoning: ai.reasoning,
+    ai_confidence: ai.confidence,
+    trade_symbol: signal.symbol,
+    trade_qty: qty,
+    trade_price: fillPrice,
+    trade_pnl: tradePnl,
+  });
+
+  return executionResult;
+}
+
 // ─────────────────────────────────────────────────────────────
 async function logExecution(
   supabase: ReturnType<typeof createClient>,
@@ -594,7 +538,6 @@ async function logExecution(
       ...fields,
     });
   } catch (err) {
-    // Non-fatal: log errors should never crash the agent run
     console.error("Failed to write agent_log:", err);
   }
 }

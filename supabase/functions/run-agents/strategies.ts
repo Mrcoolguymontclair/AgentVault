@@ -19,6 +19,9 @@ import {
   calculateBollingerBands,
   calculateVolumeMA,
   smaSlope,
+  calculateATR,
+  distanceFromHighPct,
+  distanceFromLowPct,
 } from "./market-utils.ts";
 import type { TradeSignal, BarData } from "./types.ts";
 
@@ -33,8 +36,7 @@ export function clearMarketCache(): void {
   _barsCache.clear();
 }
 
-// Last-run strategy diagnostics — written by EVERY strategy before returning null,
-// so each agent sees ITS OWN diagnostics (not a shared neighbor's).
+// Last-run strategy diagnostics — written by EVERY strategy before returning null.
 let _lastStrategyDiagnostics = "";
 export function getLastStrategyDiagnostics(): string {
   return _lastStrategyDiagnostics;
@@ -59,8 +61,17 @@ const REVERT_FALLBACK = [
   "XBI", "ARKK", "COIN", "HOOD", "RIVN", "SMCI", "MU", "INTC", "BA", "F",
 ];
 
-// Fixed ETF universe for Smart DCA
-const DCA_SYMBOLS = ["SPY", "QQQ", "VTI", "VOO", "IWM", "DIA"];
+// Smart DCA: only the three biggest broad-market ETFs.
+const DCA_SYMBOLS = ["SPY", "QQQ", "VTI"];
+
+// ─────────────────────────────────────────────────────────────
+// Global entry-rule constants (apply to ALL long entries)
+// ─────────────────────────────────────────────────────────────
+export const MIN_PRICE = 20;
+export const MIN_AVG_VOLUME = 1_000_000;
+export const MAX_OPEN_POSITIONS = 3;
+export const MAX_POSITION_PCT = 0.25; // 25% of budget per position
+export const AI_CONFIDENCE_FLOOR = 0.70;
 
 // ─────────────────────────────────────────────────────────────
 // Helpers
@@ -71,8 +82,7 @@ function heldSymbols(positions: Record<string, number>): string[] {
 
 /**
  * Quality filter: reject penny stocks and illiquid names before any strategy logic.
- * Requires price >= $15 AND average daily volume >= 500,000 shares.
- * Logs rejection reason (Bug 7).
+ * Requires price >= $20 AND average daily volume >= 1,000,000 shares.
  */
 function isQualityStock(bars: BarData[], symbol = ""): boolean {
   if (bars.length < 5) {
@@ -80,32 +90,60 @@ function isQualityStock(bars: BarData[], symbol = ""): boolean {
     return false;
   }
   const currentPrice = bars[bars.length - 1].c;
-  if (currentPrice < 15) {
-    if (symbol) console.log(`[FILTER] ${symbol} rejected: price $${currentPrice.toFixed(2)} < $15 minimum`);
+  if (currentPrice < MIN_PRICE) {
+    if (symbol) console.log(`[FILTER] ${symbol} rejected: price $${currentPrice.toFixed(2)} < $${MIN_PRICE} minimum`);
     return false;
   }
   const lookback = Math.min(20, bars.length);
   const avgVolume = bars.slice(-lookback).reduce((sum, b) => sum + b.v, 0) / lookback;
-  if (avgVolume < 500_000) {
-    if (symbol) console.log(`[FILTER] ${symbol} rejected: avg volume ${Math.round(avgVolume).toLocaleString()} < 500k`);
+  if (avgVolume < MIN_AVG_VOLUME) {
+    if (symbol) console.log(`[FILTER] ${symbol} rejected: avg volume ${Math.round(avgVolume).toLocaleString()} < ${MIN_AVG_VOLUME.toLocaleString()}`);
     return false;
   }
   return true;
 }
 
+// ─────────────────────────────────────────────────────────────
+// Exit engine — runs BEFORE any strategy evaluation
+// ─────────────────────────────────────────────────────────────
+export interface ExitParams {
+  stopLossPct: number;     // e.g. 0.07 → exit at -7%
+  takeProfitPct: number;   // e.g. 0.12 → exit at +12%
+  timeStopDays: number;    // e.g. 10 → exit if held this many days with <timeStopMinGainPct
+  timeStopMinGainPct: number; // e.g. 0.02 → must be at least +2% to skip time stop
+  enableStopLoss: boolean;
+  enableTimeStop: boolean;
+}
+
+/** Default exit thresholds per strategy. */
+export function getExitParams(strategyId: string): ExitParams {
+  switch (strategyId) {
+    case "news_trader":
+      // News fades fast — tighter risk, shorter horizon.
+      return { stopLossPct: 0.05, takeProfitPct: 0.08, timeStopDays: 3, timeStopMinGainPct: 0.02, enableStopLoss: true, enableTimeStop: true };
+    case "dca_plus":
+      // DCA holds long-term — only take-profit, no stop, no time stop.
+      return { stopLossPct: 0, takeProfitPct: 0.15, timeStopDays: 0, timeStopMinGainPct: 0, enableStopLoss: false, enableTimeStop: false };
+    default:
+      return { stopLossPct: 0.07, takeProfitPct: 0.12, timeStopDays: 10, timeStopMinGainPct: 0.02, enableStopLoss: true, enableTimeStop: true };
+  }
+}
+
 /**
- * Fixed stop-loss checker.
- * Sells a held position if it has dropped ≥ stopPct below the ENTRY price (avgCost).
- * Only activates after minHoldMs to avoid firing on normal post-entry noise.
- * Returns a sell signal for the FIRST qualifying symbol, or null.
+ * Inspect every open long position. Return the FIRST exit signal that triggers
+ * (stop-loss, take-profit, or time-stop). Subsequent ticks will catch the next.
+ * Returns null if all positions are healthy.
+ *
+ * Exit signals carry isExit=true so index.ts bypasses daily-trade-limit
+ * and skips AI confirmation — risk management always wins.
  */
-async function checkTrailingStops(
+export async function managePositions(
+  strategyId: string,
   agentPositions: Record<string, number>,
   agentAvgCost: Record<string, number>,
-  agentPositionOpenedAt: Record<string, string> = {},
-  stopPct = 0.08,          // 8% below entry price
-  minHoldMs = 7_200_000,   // 2 hours minimum hold before stop is active
+  agentPositionOpenedAt: Record<string, string>,
 ): Promise<TradeSignal | null> {
+  const params = getExitParams(strategyId);
   const now = Date.now();
 
   for (const symbol of Object.keys(agentPositions)) {
@@ -114,183 +152,141 @@ async function checkTrailingStops(
     const avgCost = agentAvgCost[symbol] ?? 0;
     if (avgCost <= 0) continue;
 
-    const openedAtStr = agentPositionOpenedAt[symbol];
-    const holdMs = openedAtStr ? now - new Date(openedAtStr).getTime() : Infinity;
-    const holdHrsStr = isFinite(holdMs) ? `${(holdMs / 3_600_000).toFixed(1)}hrs` : "unknown";
-    const stopPrice = avgCost * (1 - stopPct);
-
-    // Don't check trailing stop until position has been held long enough
-    if (holdMs < minHoldMs) {
-      console.log(
-        `[stopLoss] ${symbol}: held ${holdHrsStr}, entry=$${avgCost.toFixed(2)}, stop=$${stopPrice.toFixed(2)} (${(stopPct * 100).toFixed(0)}% below entry) → TOO EARLY (min ${(minHoldMs / 3_600_000).toFixed(0)}hr)`,
-      );
-      continue;
-    }
-
     const bars = await getDailyBars(symbol, 2);
     if (bars.length === 0) continue;
     const currentPrice = bars[bars.length - 1].c;
+    const pnlPct = (currentPrice - avgCost) / avgCost;
 
-    if (currentPrice <= stopPrice) {
-      console.log(
-        `[stopLoss] ${symbol}: held ${holdHrsStr}, entry=$${avgCost.toFixed(2)}, current=$${currentPrice.toFixed(2)}, stop=$${stopPrice.toFixed(2)} (${(stopPct * 100).toFixed(0)}% below entry) → TRIGGERED`,
-      );
+    const openedAtStr = agentPositionOpenedAt[symbol];
+    const heldMs = openedAtStr ? now - new Date(openedAtStr).getTime() : 0;
+    const heldDays = heldMs / 86_400_000;
+
+    const baseSignal = {
+      symbol,
+      side: "sell" as const,
+      notional: heldQty * currentPrice,
+      strategyConfidence: 0.95,
+      skipAiConfirmation: true,
+      isExit: true,
+      marketData: { currentPrice },
+    };
+
+    // ── Take-profit ──────────────────────────────────────────
+    if (params.takeProfitPct > 0 && pnlPct >= params.takeProfitPct) {
+      console.log(`[exit] ${symbol} TAKE-PROFIT: pnl=+${(pnlPct * 100).toFixed(1)}% >= +${(params.takeProfitPct * 100).toFixed(0)}%`);
       return {
-        symbol,
-        side: "sell",
-        notional: heldQty * currentPrice,
-        reason:
-          `Fixed stop-loss: $${currentPrice.toFixed(2)} hit stop $${stopPrice.toFixed(2)} ` +
-          `(${(stopPct * 100).toFixed(0)}% below entry $${avgCost.toFixed(2)}, held ${holdHrsStr})`,
-        strategyConfidence: 0.90,
-        marketData: { currentPrice },
+        ...baseSignal,
+        reason: `Take-profit: +${(pnlPct * 100).toFixed(1)}% (target +${(params.takeProfitPct * 100).toFixed(0)}%, avg cost $${avgCost.toFixed(2)})`,
       };
     }
 
-    console.log(
-      `[stopLoss] ${symbol}: held ${holdHrsStr}, entry=$${avgCost.toFixed(2)}, current=$${currentPrice.toFixed(2)}, stop=$${stopPrice.toFixed(2)} (${(stopPct * 100).toFixed(0)}% below entry) → SAFE`,
-    );
+    // ── Stop-loss ────────────────────────────────────────────
+    if (params.enableStopLoss && pnlPct <= -params.stopLossPct) {
+      console.log(`[exit] ${symbol} STOP-LOSS: pnl=${(pnlPct * 100).toFixed(1)}% <= -${(params.stopLossPct * 100).toFixed(0)}%`);
+      return {
+        ...baseSignal,
+        reason: `Stop-loss: ${(pnlPct * 100).toFixed(1)}% (limit -${(params.stopLossPct * 100).toFixed(0)}%, avg cost $${avgCost.toFixed(2)})`,
+      };
+    }
+
+    // ── Time-stop ────────────────────────────────────────────
+    if (
+      params.enableTimeStop &&
+      params.timeStopDays > 0 &&
+      heldDays >= params.timeStopDays &&
+      pnlPct < params.timeStopMinGainPct
+    ) {
+      console.log(`[exit] ${symbol} TIME-STOP: heldDays=${heldDays.toFixed(1)} >= ${params.timeStopDays} with pnl=${(pnlPct * 100).toFixed(1)}% < +${(params.timeStopMinGainPct * 100).toFixed(0)}%`);
+      return {
+        ...baseSignal,
+        reason: `Time-stop: held ${heldDays.toFixed(1)}d (>=${params.timeStopDays}d) with only +${(pnlPct * 100).toFixed(1)}%`,
+      };
+    }
   }
+
   return null;
 }
 
 // ─────────────────────────────────────────────────────────────
 // 1. TREND RIDER (momentum_rider)
-//    Universe: Alpaca most-actives screener (top 20 by trade count)
-//    Buy: price above SMA20, volume ≥1.2× avg, positive SMA slope
-//    Sell: price breaks below SMA20 by >2%, or trailing stop fires
+//    Long-only momentum continuation on the most-actives screener.
+//    Entry: price > 20-day SMA, positive SMA slope, volume > 20-day avg,
+//           RSI between 40-65, NOT up >4% today (avoid chasing extension).
 // ─────────────────────────────────────────────────────────────
 export async function momentumRider(
-  config: Record<string, any>,
+  _config: Record<string, any>,
   agentPositions: Record<string, number>,
-  agentAvgCost: Record<string, number> = {},
-  agentPositionOpenedAt: Record<string, string> = {},
 ): Promise<TradeSignal | null> {
   _lastStrategyDiagnostics = "[TrendRider] fetching most-actives universe...";
-
-  const stopSignal = await checkTrailingStops(agentPositions, agentAvgCost, agentPositionOpenedAt);
-  if (stopSignal) return stopSignal;
 
   let universe = await getMostActives(20);
   if (universe.length === 0) {
     console.warn("[momentumRider] screener returned empty — using fallback universe");
     universe = TREND_FALLBACK;
   }
-  // Skip cheap stocks (likely OTC / penny stocks)
   universe = universe.slice(0, 15);
 
   const lookback = 20;
-  const volPeriod = 20;
   const diagLines: string[] = [`[TrendRider] universe=${universe.slice(0, 8).join(",")}`];
   let bestSignal: TradeSignal | null = null;
   let bestStrength = 0;
 
   for (const symbol of universe) {
-    const bars = await getDailyBars(symbol, lookback + volPeriod + 5);
+    if (agentPositions[symbol] && agentPositions[symbol] > 0) {
+      diagLines.push(`${symbol}:already_held`);
+      continue;
+    }
+
+    const bars = await getDailyBars(symbol, lookback + 30);
     if (bars.length < lookback + 5) {
       diagLines.push(`${symbol}:only_${bars.length}_bars`);
       continue;
     }
-
-    // Quality filter: price >= $15, avg daily volume >= 500k
     if (!isQualityStock(bars, symbol)) {
-      diagLines.push(`${symbol}:low_quality_$${bars[bars.length - 1].c.toFixed(2)}`);
+      diagLines.push(`${symbol}:low_quality`);
       continue;
     }
 
     const closes = bars.map((b) => b.c);
     const volumes = bars.map((b) => b.v);
     const currentPrice = closes[closes.length - 1];
+    const prevClose = closes[closes.length - 2] ?? currentPrice;
+    const change1dPct = ((currentPrice - prevClose) / prevClose) * 100;
 
-    const sma = calculateSMA(closes.slice(-lookback));
-    const avgVol = calculateVolumeMA(volumes.slice(0, -1), volPeriod);
+    const sma20 = calculateSMA(closes.slice(-lookback));
+    const avgVol = calculateVolumeMA(volumes.slice(0, -1), lookback);
     const todayVol = volumes[volumes.length - 1];
     const volRatio = avgVol > 0 ? todayVol / avgVol : 0;
     const slope = smaSlope(closes, lookback, 5);
-    const priceVsSma = (currentPrice - sma) / sma;
-    const heldQty = agentPositions[symbol] ?? 0;
+    const rsi = calculateRSI(closes, 14);
+    const priceVsSma = (currentPrice - sma20) / sma20;
 
-    if (heldQty > 0) {
-      // ── Long exit: SMA breach ──────────────────────────────
-      if (priceVsSma < -0.02) {
-        const strength = Math.abs(priceVsSma);
-        if (strength > bestStrength) {
-          bestStrength = strength;
-          bestSignal = {
-            symbol,
-            side: "sell",
-            notional: heldQty * currentPrice,
-            reason:
-              `[TrendRider] SMA breach: $${currentPrice.toFixed(2)} is ` +
-              `${(Math.abs(priceVsSma) * 100).toFixed(2)}% below SMA(${lookback}) $${sma.toFixed(2)}`,
-            strategyConfidence: 0.80,
-            marketData: { currentPrice, sma },
-          };
-        }
-      }
-    } else if (heldQty < 0) {
-      // ── Short cover: price recovering toward SMA ───────────
-      // Cover when price climbs back within 2% below SMA (short trade worked)
-      // or when price goes above SMA (short trade is losing — cut loss)
-      if (priceVsSma > -0.02) {
-        const strength = Math.abs(priceVsSma) + 0.05; // slight priority boost
-        if (strength > bestStrength) {
-          bestStrength = strength;
-          const coverReason = priceVsSma >= 0
-            ? `[TrendRider] SHORT COVER (stop-loss): price $${currentPrice.toFixed(2)} rose above SMA $${sma.toFixed(2)}`
-            : `[TrendRider] SHORT COVER (take-profit): price $${currentPrice.toFixed(2)} near SMA $${sma.toFixed(2)}`;
-          bestSignal = {
-            symbol,
-            side: "buy",
-            isShort: true,
-            notional: Math.abs(heldQty) * currentPrice,
-            reason: coverReason,
-            strategyConfidence: 0.85,
-            marketData: { currentPrice, sma },
-          };
-        }
-      } else {
-        diagLines.push(`${symbol}:SHORT_open pVsSma=${(priceVsSma * 100).toFixed(1)}% (holding short)`);
+    // Entry checks — long-only
+    const aboveSma = currentPrice > sma20;
+    const slopePositive = slope > 0;
+    const volBeating = volRatio >= 1.0;
+    const rsiInRange = rsi >= 40 && rsi <= 65;
+    const notExtended = change1dPct <= 4;
+
+    if (aboveSma && slopePositive && volBeating && rsiInRange && notExtended) {
+      diagLines.push(`${symbol}:BUY rsi=${rsi.toFixed(0)} vol=${volRatio.toFixed(1)}x 1d=${change1dPct.toFixed(1)}%`);
+      // Strength = combined momentum quality
+      const strength = priceVsSma * 0.5 + Math.max(0, slope) * 100 + (volRatio - 1) * 0.2;
+      if (strength > bestStrength) {
+        bestStrength = strength;
+        bestSignal = {
+          symbol,
+          side: "buy",
+          notional: 25, // % of budget; index.ts enforces 25% cap
+          reason:
+            `[TrendRider] $${currentPrice.toFixed(2)} > SMA20 $${sma20.toFixed(2)} (+${(priceVsSma * 100).toFixed(1)}%), ` +
+            `slope+, vol ${volRatio.toFixed(1)}x avg, RSI ${rsi.toFixed(0)} (40-65), today ${change1dPct.toFixed(1)}%`,
+          strategyConfidence: Math.min(1, 0.55 + priceVsSma * 4 + (volRatio - 1) * 0.1),
+          marketData: { currentPrice, sma: sma20, rsi },
+        };
       }
     } else {
-      // ── No position: check for long entry OR short entry ───
-      if (priceVsSma >= 0 && priceVsSma <= 0.08 && volRatio >= 1.2 && slope > 0) {
-        // Long entry: price above SMA, high volume, positive slope
-        diagLines.push(`${symbol}:BUY pVsSma=${(priceVsSma * 100).toFixed(1)}% vol=${volRatio.toFixed(1)}x`);
-        if (priceVsSma > bestStrength) {
-          bestStrength = priceVsSma;
-          bestSignal = {
-            symbol,
-            side: "buy",
-            notional: 10,
-            reason:
-              `[TrendRider] $${currentPrice.toFixed(2)} is ${(priceVsSma * 100).toFixed(2)}% above SMA(${lookback}) ` +
-              `$${sma.toFixed(2)}, vol ${volRatio.toFixed(1)}x avg, slope positive`,
-            strategyConfidence: Math.min(1, priceVsSma * 8 + 0.35),
-            marketData: { currentPrice, sma },
-          };
-        }
-      } else if (priceVsSma <= -0.05 && volRatio >= 1.2 && slope < -0.0005) {
-        // Short entry: price ≥5% below SMA, high volume, negative slope
-        const shortStrength = Math.abs(priceVsSma);
-        diagLines.push(`${symbol}:SHORT pVsSma=${(priceVsSma * 100).toFixed(1)}% vol=${volRatio.toFixed(1)}x slope=${slope.toFixed(4)}`);
-        if (shortStrength > bestStrength) {
-          bestStrength = shortStrength;
-          bestSignal = {
-            symbol,
-            side: "sell",
-            isShort: true,
-            notional: 10, // % of budget (same convention as long buys)
-            reason:
-              `[TrendRider] SHORT: $${currentPrice.toFixed(2)} is ${(Math.abs(priceVsSma) * 100).toFixed(2)}% below SMA(${lookback}) ` +
-              `$${sma.toFixed(2)}, vol ${volRatio.toFixed(1)}x avg, slope negative`,
-            strategyConfidence: Math.min(1, shortStrength * 6 + 0.35),
-            marketData: { currentPrice, sma },
-          };
-        }
-      } else {
-        diagLines.push(`${symbol}:no_signal pVsSma=${(priceVsSma * 100).toFixed(1)}% vol=${volRatio.toFixed(1)}x slope=${slope.toFixed(4)}`);
-      }
+      diagLines.push(`${symbol}:no aboveSma=${aboveSma} slope+=${slopePositive} vol=${volRatio.toFixed(1)}x rsi=${rsi.toFixed(0)} 1d=${change1dPct.toFixed(1)}%`);
     }
   }
 
@@ -301,20 +297,16 @@ export async function momentumRider(
 
 // ─────────────────────────────────────────────────────────────
 // 2. BARGAIN HUNTER (mean_reversion)
-//    Universe: Alpaca top-losers screener (biggest daily % decliners)
-//    Buy: RSI<40, below lower Bollinger Band, 50d uptrend intact
-//    Sell: RSI>60 (overbought), or trailing stop fires
+//    Long-only mean reversion on top-losers screener.
+//    Entry: down 3-8% today (real dip, not crash), RSI < 35,
+//           50-day SMA still rising (not catching a falling knife),
+//           reject penny / biotech / meme names via quality filter + price >= $20.
 // ─────────────────────────────────────────────────────────────
 export async function meanReversion(
-  config: Record<string, any>,
+  _config: Record<string, any>,
   agentPositions: Record<string, number>,
-  agentAvgCost: Record<string, number> = {},
-  agentPositionOpenedAt: Record<string, string> = {},
 ): Promise<TradeSignal | null> {
   _lastStrategyDiagnostics = "[BargainHunter] fetching top-losers universe...";
-
-  const stopSignal = await checkTrailingStops(agentPositions, agentAvgCost, agentPositionOpenedAt);
-  if (stopSignal) return stopSignal;
 
   let universe = await getTopLosers(20);
   if (universe.length === 0) {
@@ -324,122 +316,57 @@ export async function meanReversion(
   universe = universe.slice(0, 15);
 
   const rsiPeriod = 14;
-  const rsiOversold = Number(config.rsi_oversold ?? 40);
-  const rsiOverbought = Number(config.rsi_overbought ?? 60);
-  const barsNeeded = 60;
   const diagLines: string[] = [`[BargainHunter] universe=${universe.slice(0, 8).join(",")}`];
   let bestSignal: TradeSignal | null = null;
-  let bestExtreme = 0;
+  let bestRsiDepth = 0;
 
   for (const symbol of universe) {
-    const bars = await getDailyBars(symbol, barsNeeded);
-    if (bars.length < rsiPeriod + 20) {
-      diagLines.push(`${symbol}:not_enough_bars`);
+    if (agentPositions[symbol] && agentPositions[symbol] > 0) {
+      diagLines.push(`${symbol}:already_held`);
       continue;
     }
 
-    // Quality filter: price >= $15, avg daily volume >= 500k
+    const bars = await getDailyBars(symbol, 60);
+    if (bars.length < rsiPeriod + 50) {
+      diagLines.push(`${symbol}:not_enough_bars`);
+      continue;
+    }
     if (!isQualityStock(bars, symbol)) {
-      diagLines.push(`${symbol}:low_quality_$${bars[bars.length - 1].c.toFixed(2)}`);
+      diagLines.push(`${symbol}:low_quality`);
       continue;
     }
 
     const closes = bars.map((b) => b.c);
     const currentPrice = closes[closes.length - 1];
+    const prevClose = closes[closes.length - 2] ?? currentPrice;
+    const change1dPct = ((currentPrice - prevClose) / prevClose) * 100;
 
     const rsi = calculateRSI(closes, rsiPeriod);
-    const bb = calculateBollingerBands(closes, 20, 2);
-    const sma50 = closes.length >= 50 ? calculateSMA(closes.slice(-50)) : null;
-    const sma50Prev = closes.length >= 55 ? calculateSMA(closes.slice(-55, -5)) : null;
-    const inUptrend = sma50 !== null && sma50Prev !== null && sma50 >= sma50Prev;
-    const heldQty = agentPositions[symbol] ?? 0;
+    const sma50 = calculateSMA(closes.slice(-50));
+    const sma50Prev = calculateSMA(closes.slice(-55, -5));
+    const sma50Rising = sma50 > sma50Prev;
 
-    if (heldQty > 0) {
-      // ── Long exit: overbought ────────────────────────────────
-      if (rsi > rsiOverbought) {
-        const extreme = rsi - rsiOverbought;
-        if (extreme > bestExtreme) {
-          bestExtreme = extreme;
-          bestSignal = {
-            symbol,
-            side: "sell",
-            notional: heldQty * currentPrice,
-            reason: `[BargainHunter] RSI(${rsiPeriod})=${rsi.toFixed(1)}>${rsiOverbought} — overbought exit`,
-            strategyConfidence: Math.min(1, extreme / 20 + 0.3),
-            marketData: { currentPrice, rsi },
-          };
-        }
-      }
-    } else if (heldQty < 0) {
-      // ── Short cover: RSI normalized back below 50 ────────────
-      if (rsi < 50) {
-        const extreme = 50 - rsi;
-        if (extreme > bestExtreme) {
-          bestExtreme = extreme;
-          const coverReason = rsi < rsiOversold
-            ? `[BargainHunter] SHORT COVER (take-profit): RSI(${rsiPeriod})=${rsi.toFixed(1)} — deeply oversold`
-            : `[BargainHunter] SHORT COVER: RSI(${rsiPeriod})=${rsi.toFixed(1)} normalizing below 50`;
-          bestSignal = {
-            symbol,
-            side: "buy",
-            isShort: true,
-            notional: Math.abs(heldQty) * currentPrice,
-            reason: coverReason,
-            strategyConfidence: Math.min(1, extreme / 20 + 0.45),
-            marketData: { currentPrice, rsi },
-          };
-        }
-      } else {
-        diagLines.push(`${symbol}:SHORT_open RSI=${rsi.toFixed(1)} (holding short)`);
+    const validDip = change1dPct <= -3 && change1dPct >= -8;
+    const oversold = rsi < 35;
+
+    if (validDip && oversold && sma50Rising) {
+      const rsiDepth = 35 - rsi;
+      diagLines.push(`${symbol}:BUY 1d=${change1dPct.toFixed(1)}% RSI=${rsi.toFixed(0)} sma50_rising`);
+      if (rsiDepth > bestRsiDepth) {
+        bestRsiDepth = rsiDepth;
+        bestSignal = {
+          symbol,
+          side: "buy",
+          notional: 25,
+          reason:
+            `[BargainHunter] $${currentPrice.toFixed(2)} dropped ${change1dPct.toFixed(1)}% today, RSI ${rsi.toFixed(0)} (<35), ` +
+            `50d SMA still rising ($${sma50.toFixed(2)} > $${sma50Prev.toFixed(2)}) — quality dip`,
+          strategyConfidence: Math.min(1, 0.55 + rsiDepth / 30 + 0.05),
+          marketData: { currentPrice, rsi },
+        };
       }
     } else {
-      // ── No position: check for long buy OR short entry ───────
-      const belowBB = currentPrice <= bb.lower * 1.02;
-      if (rsi < rsiOversold && belowBB && inUptrend) {
-        const extreme = rsiOversold - rsi;
-        if (extreme > bestExtreme) {
-          bestExtreme = extreme;
-          diagLines.push(
-            `${symbol}:BUY RSI=${rsi.toFixed(1)} bb=${bb.lower.toFixed(2)} uptrend=true`,
-          );
-          bestSignal = {
-            symbol,
-            side: "buy",
-            notional: 10,
-            reason:
-              `[BargainHunter] RSI(${rsiPeriod})=${rsi.toFixed(1)}<${rsiOversold}, ` +
-              `below BB lower $${bb.lower.toFixed(2)}, 50d uptrend confirmed`,
-            strategyConfidence: Math.min(1, extreme / 20 + 0.3),
-            marketData: { currentPrice, rsi },
-          };
-        }
-      } else {
-        // Short entry: RSI > 80 AND above upper Bollinger Band (overbought extreme)
-        const aboveBB = currentPrice >= bb.upper * 0.98;
-        const shortRsiTrigger = 80;
-        if (rsi > shortRsiTrigger && aboveBB) {
-          const extreme = rsi - shortRsiTrigger;
-          if (extreme > bestExtreme) {
-            bestExtreme = extreme;
-            diagLines.push(`${symbol}:SHORT RSI=${rsi.toFixed(1)} aboveBB=true`);
-            bestSignal = {
-              symbol,
-              side: "sell",
-              isShort: true,
-              notional: 10,
-              reason:
-                `[BargainHunter] SHORT: RSI(${rsiPeriod})=${rsi.toFixed(1)}>${shortRsiTrigger}, ` +
-                `price $${currentPrice.toFixed(2)} above BB upper $${bb.upper.toFixed(2)} — overbought`,
-              strategyConfidence: Math.min(1, extreme / 20 + 0.3),
-              marketData: { currentPrice, rsi },
-            };
-          }
-        } else {
-          diagLines.push(
-            `${symbol}:RSI=${rsi.toFixed(1)} belowBB=${belowBB} uptrend=${inUptrend}`,
-          );
-        }
-      }
+      diagLines.push(`${symbol}:no 1d=${change1dPct.toFixed(1)}% rsi=${rsi.toFixed(0)} sma50_rising=${sma50Rising}`);
     }
   }
 
@@ -450,29 +377,22 @@ export async function meanReversion(
 
 // ─────────────────────────────────────────────────────────────
 // 3. NEWS TRADER (news_trader)
-//    Universe: ALL recent Alpaca news (no symbol filter)
-//    Pure sentiment — zero technical analysis.
-//    One global news call → Groq evaluates every headline and
-//    returns the single strongest sentiment trade.
+//    Long-only pure sentiment trade.
+//    Entry: sentiment > 0.5, price >= $20, vol >= 500K (looser vol — news names are events).
+//    Max 2 news entries/day enforced by index.ts daily trade limit.
+//    Exits centralized in managePositions with tighter thresholds.
 // ─────────────────────────────────────────────────────────────
 export async function newsTrader(
   config: Record<string, any>,
   agentPositions: Record<string, number>,
-  agentAvgCost: Record<string, number> = {},
-  agentPositionOpenedAt: Record<string, string> = {},
 ): Promise<TradeSignal | null> {
   _lastStrategyDiagnostics = "[NewsTrader] fetching global news stream...";
 
-  // News Trader is PURE SENTIMENT — no stop losses, no technical filters.
-  // Only input: headlines → Groq sentiment → trade or skip.
-
-  // Default threshold: 0.3 (moderate sentiment triggers a trade).
-  // config.sentiment_threshold is stored as integer tenths (e.g. 3 → 0.3, 6 → 0.6).
-  const sentimentThreshold = Number(config.sentiment_threshold ?? 3) / 10;
-  const maxPositions = Number(config.max_positions ?? 3);
+  // News Trader uses 0.5 sentiment threshold by default (stronger conviction).
+  // config.sentiment_threshold stored as integer tenths (e.g. 5 → 0.5).
+  const sentimentThreshold = Number(config.sentiment_threshold ?? 5) / 10;
   const held = heldSymbols(agentPositions);
 
-  // Fetch ALL news — no symbol filter
   const rawNews = await getAllNews(50);
   if (rawNews.length === 0) {
     _lastStrategyDiagnostics = "[NewsTrader] no news articles returned from API";
@@ -480,7 +400,6 @@ export async function newsTrader(
     return null;
   }
 
-  // Build headlinesBySymbol from the full global news stream
   const headlinesBySymbol: Record<string, string[]> = {};
   for (const article of rawNews) {
     if (!article.headline) continue;
@@ -491,8 +410,7 @@ export async function newsTrader(
   }
 
   const symbolCount = Object.keys(headlinesBySymbol).length;
-  _lastStrategyDiagnostics =
-    `[NewsTrader] ${rawNews.length} articles, ${symbolCount} unique symbols`;
+  _lastStrategyDiagnostics = `[NewsTrader] ${rawNews.length} articles, ${symbolCount} symbols`;
 
   if (symbolCount === 0) {
     console.log(`[newsTrader] ${_lastStrategyDiagnostics} — no tagged symbols`);
@@ -505,80 +423,53 @@ export async function newsTrader(
     sentimentThreshold,
   });
 
-  if (!decision.execute || !decision.symbol) {
-    _lastStrategyDiagnostics +=
-      ` | no trade signal (score=${(decision.sentiment_score ?? 0).toFixed(2)})`;
-    console.log(`[newsTrader] ${_lastStrategyDiagnostics}`);
-    return null;
-  }
-  if (Math.abs(decision.sentiment_score) < sentimentThreshold) {
-    _lastStrategyDiagnostics +=
-      ` | score ${decision.sentiment_score.toFixed(2)} below threshold ${sentimentThreshold}`;
+  // Long-only: only "buy" decisions emit signals. "sell" decisions could close
+  // an existing long, but exits are handled by managePositions, so we ignore.
+  if (!decision.execute || !decision.symbol || decision.side !== "buy") {
+    _lastStrategyDiagnostics += ` | no buy signal (score=${(decision.sentiment_score ?? 0).toFixed(2)})`;
     console.log(`[newsTrader] ${_lastStrategyDiagnostics}`);
     return null;
   }
 
-  const heldQty = agentPositions[decision.symbol] ?? 0;
+  if (decision.sentiment_score < sentimentThreshold) {
+    _lastStrategyDiagnostics += ` | score ${decision.sentiment_score.toFixed(2)} below threshold ${sentimentThreshold}`;
+    console.log(`[newsTrader] ${_lastStrategyDiagnostics}`);
+    return null;
+  }
 
-  const bars = await getDailyBars(decision.symbol, 2);
+  if ((agentPositions[decision.symbol] ?? 0) > 0) {
+    _lastStrategyDiagnostics += ` | already long ${decision.symbol}`;
+    return null;
+  }
+
+  const bars = await getDailyBars(decision.symbol, 25);
   if (bars.length === 0) return null;
   const currentPrice = bars[bars.length - 1].c;
 
-  const headlines = (headlinesBySymbol[decision.symbol] ?? []).slice(0, 5);
+  // News-trader uses a slightly looser quality filter: $20 price, 500K vol
+  // (news names are often event-driven and can lack institutional volume).
+  if (currentPrice < MIN_PRICE) {
+    _lastStrategyDiagnostics += ` | ${decision.symbol} price $${currentPrice.toFixed(2)} < $${MIN_PRICE}`;
+    return null;
+  }
+  const lookback = Math.min(20, bars.length);
+  const avgVol = bars.slice(-lookback).reduce((s, b) => s + b.v, 0) / lookback;
+  if (avgVol < 500_000) {
+    _lastStrategyDiagnostics += ` | ${decision.symbol} vol ${Math.round(avgVol).toLocaleString()} < 500k`;
+    return null;
+  }
+
+  const headlines = (headlinesBySymbol[decision.symbol] ?? []).slice(0, 3);
   const headlineText = headlines.map((h) => h.slice(0, 80)).join(" | ");
 
-  // Short cover: bullish signal on a symbol we're already short
-  if (decision.side === "buy" && heldQty < 0) {
-    _lastStrategyDiagnostics +=
-      ` | SHORT_COVER ${decision.symbol} score=${decision.sentiment_score.toFixed(2)}`;
-    console.log(`[newsTrader] ${_lastStrategyDiagnostics}`);
-    return {
-      symbol: decision.symbol,
-      side: "buy",
-      isShort: true,
-      notional: Math.abs(heldQty) * currentPrice,
-      reason:
-        `[NewsTrader] SHORT COVER: sentiment turned positive (score=${decision.sentiment_score.toFixed(2)}) — ${decision.reasoning} | Headlines: ${headlineText}`,
-      strategyConfidence: decision.confidence,
-      skipAiConfirmation: true,
-      marketData: { currentPrice, sentimentScore: decision.sentiment_score },
-    };
-  }
-
-  if (decision.side === "buy" && heldQty > 0) return null; // already long
-  if (decision.side === "buy" && held.length >= maxPositions) return null;
-
-  // Short entry: strongly bearish signal on a symbol we don't own
-  if (decision.side === "sell" && heldQty === 0) {
-    _lastStrategyDiagnostics +=
-      ` | SHORT_ENTRY ${decision.symbol} score=${decision.sentiment_score.toFixed(2)}`;
-    console.log(`[newsTrader] ${_lastStrategyDiagnostics}`);
-    return {
-      symbol: decision.symbol,
-      side: "sell",
-      isShort: true,
-      notional: 15,
-      reason:
-        `[NewsTrader] SHORT: bearish sentiment score=${decision.sentiment_score.toFixed(2)} — ${decision.reasoning} | Headlines: ${headlineText}`,
-      strategyConfidence: decision.confidence,
-      skipAiConfirmation: true,
-      marketData: { currentPrice, sentimentScore: decision.sentiment_score },
-    };
-  }
-
-  if (decision.side === "sell" && heldQty < 0) return null; // already short
-
-  // Regular long buy or long sell (close position)
-  _lastStrategyDiagnostics +=
-    ` | TRADE ${decision.side} ${decision.symbol} score=${decision.sentiment_score.toFixed(2)}`;
+  _lastStrategyDiagnostics += ` | BUY ${decision.symbol} score=${decision.sentiment_score.toFixed(2)}`;
   console.log(`[newsTrader] ${_lastStrategyDiagnostics}`);
 
   return {
     symbol: decision.symbol,
-    side: decision.side,
-    notional: decision.side === "buy" ? 15 : heldQty * currentPrice,
-    reason:
-      `[NewsTrader] score=${decision.sentiment_score.toFixed(2)} — ${decision.reasoning} | Headlines: ${headlineText}`,
+    side: "buy",
+    notional: 20, // 20% of budget — news catalysts justify a meaningful size
+    reason: `[NewsTrader] sentiment ${decision.sentiment_score.toFixed(2)} — ${decision.reasoning} | ${headlineText}`,
     strategyConfidence: decision.confidence,
     skipAiConfirmation: true,
     marketData: { currentPrice, sentimentScore: decision.sentiment_score },
@@ -587,40 +478,33 @@ export async function newsTrader(
 
 // ─────────────────────────────────────────────────────────────
 // 4. BLIND QUANT (blind_quant)
-//    Universe: most-actives screener — rich volume data
-//    Anonymizes all symbols (Asset_A, Asset_B…) and sends pure
-//    numerical data to Groq. No ticker names, no sector info.
+//    12 anonymized features per asset + SPY market regime.
+//    Pre-filter to top 5 most-promising assets before sending to Groq.
+//    Long-only.
 // ─────────────────────────────────────────────────────────────
 export async function blindQuant(
   config: Record<string, any>,
   agentPositions: Record<string, number>,
-  agentAvgCost: Record<string, number> = {},
-  agentPositionOpenedAt: Record<string, string> = {},
 ): Promise<TradeSignal | null> {
   _lastStrategyDiagnostics = "[BlindQuant] fetching most-actives universe...";
 
-  const stopSignal = await checkTrailingStops(agentPositions, agentAvgCost, agentPositionOpenedAt);
-  if (stopSignal) return stopSignal;
-
-  let universe = await getMostActives(15);
+  let universe = await getMostActives(20);
   if (universe.length === 0) {
     console.warn("[blindQuant] screener returned empty — using fallback universe");
     universe = TREND_FALLBACK;
   }
-  universe = universe.slice(0, 15);
+  universe = universe.slice(0, 20);
 
-  const minConfidence = Number(config.min_confidence ?? 6) / 10;
-  const maxPositions = Number(config.max_positions ?? 3);
-  const held = heldSymbols(agentPositions);
-  const assets: AnonAsset[] = [];
-  const assetIdToSymbol: Record<string, string> = {};
-  let idx = 0;
+  const minConfidence = Number(config.min_confidence ?? 7) / 10; // 0.70 default
+
+  // Build asset feature vectors for the full universe...
+  type ScoredAsset = { symbol: string; features: AnonAsset; score: number };
+  const scored: ScoredAsset[] = [];
 
   for (const symbol of universe) {
-    const bars = await getDailyBars(symbol, 30);
-    if (bars.length < 22) continue;
-
-    // Quality filter: only anonymize liquid, mid/large-cap stocks
+    // Need ~260 bars for 52-week distance + 30 bars for ATR/RSI/etc.
+    const bars = await getDailyBars(symbol, 260);
+    if (bars.length < 60) continue;
     if (!isQualityStock(bars, symbol)) continue;
 
     const closes = bars.map((b) => b.c);
@@ -645,145 +529,116 @@ export async function blindQuant(
     const bbRange = bb.upper - bb.lower;
     const bbPos = bbRange > 0 ? Math.min(1, Math.max(0, (cur - bb.lower) / bbRange)) : 0.5;
 
-    const high20 = Math.max(...highs.slice(-20));
-    const low20 = Math.min(...lows.slice(-20));
-    const distHigh = high20 > 0 ? ((cur - high20) / high20) * 100 : 0;
-    const distLow = low20 > 0 ? ((cur - low20) / low20) * 100 : 0;
-
     const ret20 = closes.slice(-21);
     const rets = ret20.slice(1).map((c, i) => (c - ret20[i]) / ret20[i]);
     const mu = rets.reduce((a, b) => a + b, 0) / rets.length;
     const vol20 = Math.sqrt(rets.reduce((a, r) => a + (r - mu) ** 2, 0) / rets.length);
 
     const slope = smaSlope(closes, 20, 5);
+    const dist52wHigh = distanceFromHighPct(closes, 252);
+    const dist52wLow = distanceFromLowPct(closes, 252);
+    const atr14 = calculateATR(highs, lows, closes, 14);
 
-    const assetId = `Asset_${String.fromCharCode(65 + idx)}`;
-    assetIdToSymbol[assetId] = symbol;
-    idx++;
-
-    assets.push({
-      asset_id: assetId,
+    const features: AnonAsset = {
+      asset_id: "",
       price_change_1d_pct: Number(change1d.toFixed(3)),
       price_change_5d_pct: Number(change5d.toFixed(3)),
       price_change_20d_pct: Number(change20d.toFixed(3)),
       volume_vs_avg_20d: Number(volRatio.toFixed(3)),
       rsi_14: Number(rsi14.toFixed(1)),
-      distance_from_20d_high_pct: Number(distHigh.toFixed(3)),
-      distance_from_20d_low_pct: Number(distLow.toFixed(3)),
+      bollinger_position: Number(bbPos.toFixed(3)),
       volatility_20d: Number(vol20.toFixed(4)),
       sma_20_slope: Number(slope.toFixed(5)),
-      bollinger_position: Number(bbPos.toFixed(3)),
-    });
+      distance_from_52w_high_pct: Number(dist52wHigh.toFixed(2)),
+      distance_from_52w_low_pct: Number(dist52wLow.toFixed(2)),
+      atr_14: Number(atr14.toFixed(3)),
+    };
+
+    // Heuristic pre-filter score: trend up + vol surge - extension penalty.
+    const score =
+      change5d * 0.4 +
+      change20d * 0.2 +
+      (volRatio - 1) * 5 +
+      (slope > 0 ? 2 : -2) +
+      (rsi14 > 70 ? -3 : 0) +
+      (rsi14 < 30 ? 2 : 0);
+
+    scored.push({ symbol, features, score });
   }
 
+  // Pre-filter: top 5 by score, then rename to Asset_A..E
+  scored.sort((a, b) => b.score - a.score);
+  const top = scored.slice(0, 5);
+  const assetIdToSymbol: Record<string, string> = {};
+  const assets: AnonAsset[] = top.map((s, i) => {
+    const id = `Asset_${String.fromCharCode(65 + i)}`;
+    assetIdToSymbol[id] = s.symbol;
+    return { ...s.features, asset_id: id };
+  });
+
   _lastStrategyDiagnostics =
-    `[BlindQuant] universe=${universe.slice(0, 8).join(",")} assets=${assets.length}`;
+    `[BlindQuant] universe=${universe.slice(0, 8).join(",")} top5=${top.map((s) => s.symbol).join(",")}`;
 
   if (assets.length === 0) {
     console.log(`[blindQuant] ${_lastStrategyDiagnostics} — no data`);
     return null;
   }
 
+  // SPY market regime — sent to Groq alongside the asset block.
+  const spyBars = await getDailyBars("SPY", 3);
+  const spyChange = spyBars.length >= 2
+    ? ((spyBars[spyBars.length - 1].c - spyBars[spyBars.length - 2].c) / spyBars[spyBars.length - 2].c) * 100
+    : 0;
+
   const heldAssetIds = Object.entries(assetIdToSymbol)
     .filter(([, sym]) => (agentPositions[sym] ?? 0) > 0)
     .map(([id]) => id);
 
-  const shortedAssetIds = Object.entries(assetIdToSymbol)
-    .filter(([, sym]) => (agentPositions[sym] ?? 0) < 0)
-    .map(([id]) => id);
-
-  const decision = await blindQuantDecision({ assets, heldAssetIds, shortedAssetIds, minConfidence });
+  const decision = await blindQuantDecision({
+    assets,
+    heldAssetIds,
+    minConfidence,
+    spyChange1dPct: spyChange,
+  });
 
   if (!decision.execute || !decision.asset_id || decision.confidence < minConfidence) {
-    _lastStrategyDiagnostics +=
-      ` | no signal (confidence=${(decision.confidence ?? 0).toFixed(2)})`;
+    _lastStrategyDiagnostics += ` | no signal (conf=${(decision.confidence ?? 0).toFixed(2)})`;
     console.log(`[blindQuant] ${_lastStrategyDiagnostics}`);
     return null;
   }
 
   const symbol = assetIdToSymbol[decision.asset_id];
   if (!symbol) return null;
-
   const heldQty = agentPositions[symbol] ?? 0;
 
-  // ── SPY market regime filter (only for NEW positions) ───────────────────
-  // Bear market (SPY -1.5%+): block new longs. Bull market (SPY +1.5%+): block new shorts.
-  const spyBars = await getDailyBars("SPY", 3);
-  const spyChange = spyBars.length >= 2
-    ? ((spyBars[spyBars.length - 1].c - spyBars[spyBars.length - 2].c) / spyBars[spyBars.length - 2].c) * 100
-    : 0;
-  if (spyChange < -1.5 && decision.side === "buy" && heldQty === 0) {
-    _lastStrategyDiagnostics += ` | bear market (SPY ${spyChange.toFixed(1)}%) — new long blocked`;
+  // Long-only: only emit buys on un-held names; "sell" exits are handled centrally.
+  if (decision.side !== "buy") {
+    _lastStrategyDiagnostics += ` | side=${decision.side} ignored (exits centralized)`;
+    return null;
+  }
+  if (heldQty > 0) return null;
+
+  // Bear-market regime block: SPY -1.5%+ → no new longs.
+  if (spyChange < -1.5) {
+    _lastStrategyDiagnostics += ` | bear market SPY ${spyChange.toFixed(1)}% — new long blocked`;
     console.log(`[blindQuant] ${_lastStrategyDiagnostics}`);
     return null;
   }
-  if (spyChange > 1.5 && decision.side === "sell" && heldQty === 0) {
-    _lastStrategyDiagnostics += ` | bull market (SPY ${spyChange.toFixed(1)}%) — new short blocked`;
-    console.log(`[blindQuant] ${_lastStrategyDiagnostics}`);
-    return null;
-  }
-  _lastStrategyDiagnostics += ` | SPY ${spyChange.toFixed(1)}%`;
 
   const bars = await getDailyBars(symbol, 2);
   if (bars.length === 0) return null;
   const currentPrice = bars[bars.length - 1].c;
   const anonAsset = assets.find((a) => a.asset_id === decision.asset_id);
 
-  // Short cover: AI bullish on a symbol we're short
-  if (decision.side === "buy" && heldQty < 0) {
-    _lastStrategyDiagnostics +=
-      ` | SHORT_COVER ${decision.asset_id}→${symbol} conf=${decision.confidence.toFixed(2)}`;
-    console.log(`[blindQuant] ${_lastStrategyDiagnostics}`);
-    return {
-      symbol,
-      side: "buy",
-      isShort: true,
-      notional: Math.abs(heldQty) * currentPrice,
-      reason:
-        `[BlindQuant] SHORT COVER ${decision.asset_id}→${symbol} | ${decision.reasoning} | ` +
-        `data=${JSON.stringify(anonAsset)}`,
-      strategyConfidence: decision.confidence,
-      skipAiConfirmation: true,
-      marketData: { currentPrice },
-    };
-  }
-
-  if (decision.side === "buy" && heldQty > 0) return null; // already long
-  if (decision.side === "buy" && held.length >= maxPositions) return null;
-
-  // Short entry: AI bearish on a symbol we don't hold
-  if (decision.side === "sell" && heldQty === 0) {
-    _lastStrategyDiagnostics +=
-      ` | SHORT_ENTRY ${decision.asset_id}→${symbol} conf=${decision.confidence.toFixed(2)}`;
-    console.log(`[blindQuant] ${_lastStrategyDiagnostics}`);
-    return {
-      symbol,
-      side: "sell",
-      isShort: true,
-      notional: 10,
-      reason:
-        `[BlindQuant] SHORT ${decision.asset_id}→${symbol} | ${decision.reasoning} | ` +
-        `data=${JSON.stringify(anonAsset)}`,
-      strategyConfidence: decision.confidence,
-      skipAiConfirmation: true,
-      marketData: { currentPrice },
-    };
-  }
-
-  if (decision.side === "sell" && heldQty < 0) return null; // already short
-
-  // Regular: long buy or close long
   _lastStrategyDiagnostics +=
-    ` | TRADE ${decision.side} ${decision.asset_id}→${symbol} conf=${decision.confidence.toFixed(2)}`;
+    ` | BUY ${decision.asset_id}→${symbol} conf=${decision.confidence.toFixed(2)} SPY=${spyChange.toFixed(1)}%`;
   console.log(`[blindQuant] ${_lastStrategyDiagnostics}`);
 
   return {
     symbol,
-    side: decision.side,
-    notional: decision.side === "buy" ? 10 : heldQty * currentPrice,
-    reason:
-      `[BlindQuant] ${decision.asset_id}→${symbol} | ${decision.reasoning} | ` +
-      `data=${JSON.stringify(anonAsset)}`,
+    side: "buy",
+    notional: 20,
+    reason: `[BlindQuant] ${decision.asset_id}→${symbol} | ${decision.reasoning} | data=${JSON.stringify(anonAsset)}`,
     strategyConfidence: decision.confidence,
     skipAiConfirmation: true,
     marketData: { currentPrice },
@@ -792,69 +647,33 @@ export async function blindQuant(
 
 // ─────────────────────────────────────────────────────────────
 // 5. SMART DCA (dca_plus)
-//    Universe: fixed ETFs [SPY, QQQ, VTI, VOO, IWM, DIA]
-//    Buy on 3%/5%/8% dips below 20d avg; 1.5× size on market fear.
-//    Take-profit: sell when up 10% from avg cost.
-//    Trailing stop: 5% from 20d-high (looser for ETFs).
+//    Only SPY / QQQ / VTI.
+//    Once-per-day-per-symbol gate.
+//    Tiered buy sizing: 3-5% dip → 10% of budget, 5-7% dip → 20%, 7%+ → 30%.
+//    Take-profit at +15%. No stop loss. No time stop.
 // ─────────────────────────────────────────────────────────────
 export async function dcaPlus(
-  config: Record<string, any>,
+  _config: Record<string, any>,
   agentPositions: Record<string, number>,
-  agentAvgCost: Record<string, number> = {},
-  agentPositionOpenedAt: Record<string, string> = {},
+  _agentAvgCost: Record<string, number> = {},
+  _agentPositionOpenedAt: Record<string, string> = {},
+  agentLastBuyAt: Record<string, string> = {},
 ): Promise<TradeSignal | null> {
   _lastStrategyDiagnostics = `[SmartDCA] universe=${DCA_SYMBOLS.join(",")}`;
-  console.log(`[dcaPlus] ${_lastStrategyDiagnostics}`);
 
-  // 10% trailing stop for ETFs, only after 24 hours (long-term DCA positions need room)
-  const stopSignal = await checkTrailingStops(agentPositions, agentAvgCost, agentPositionOpenedAt, 0.10, 86_400_000);
-  if (stopSignal) return stopSignal;
-
-  const baseAmount = Number(config.base_amount ?? 100);
-
-  // ── Take-profit check ─────────────────────────────────────────
-  for (const symbol of DCA_SYMBOLS) {
-    const heldQty = agentPositions[symbol] ?? 0;
-    if (heldQty <= 0) continue;
-    const avgCost = agentAvgCost[symbol] ?? 0;
-    if (avgCost <= 0) continue;
-
-    const bars = await getDailyBars(symbol, 2);
-    if (bars.length === 0) continue;
-    const price = bars[bars.length - 1].c;
-    const gainPct = ((price - avgCost) / avgCost) * 100;
-
-    if (gainPct >= 10) {
-      return {
-        symbol,
-        side: "sell",
-        notional: heldQty * price,
-        reason:
-          `[SmartDCA] take-profit: ${gainPct.toFixed(1)}% gain from avg cost $${avgCost.toFixed(2)}`,
-        strategyConfidence: 0.95,
-        marketData: { currentPrice: price, dipPct: gainPct },
-      };
-    }
-  }
-
-  // ── Market fear: SPY down >2% today ───────────────────────────
-  let marketFear = false;
-  const spyBars = await getDailyBars("SPY", 3);
-  if (spyBars.length >= 2) {
-    const spyChange =
-      ((spyBars[spyBars.length - 1].c - spyBars[spyBars.length - 2].c) /
-        spyBars[spyBars.length - 2].c) *
-      100;
-    marketFear = spyChange < -2;
-    _lastStrategyDiagnostics +=
-      ` | spyChange=${spyChange.toFixed(2)}%${marketFear ? " FEAR" : ""}`;
-  }
-
-  // ── Buy on dip ────────────────────────────────────────────────
+  // Once-per-day-per-symbol gate
+  const today = new Date().toISOString().slice(0, 10);
   let bestSignal: TradeSignal | null = null;
   let bestDip = -Infinity;
 
   for (const symbol of DCA_SYMBOLS) {
+    // Day-gate: skip if this symbol was already bought today
+    const lastBuy = agentLastBuyAt[symbol];
+    if (lastBuy && lastBuy.slice(0, 10) === today) {
+      _lastStrategyDiagnostics += ` | ${symbol}:already_bought_today`;
+      continue;
+    }
+
     const bars = await getDailyBars(symbol, 22);
     if (bars.length < 10) continue;
 
@@ -864,26 +683,32 @@ export async function dcaPlus(
     const dip = dipPercent(currentPrice, avg20);
     const heldQty = agentPositions[symbol] ?? 0;
 
+    // Tiered sizing — only buy on a meaningful dip
+    let sizePct = 0;
+    if (dip >= 7) sizePct = 30;
+    else if (dip >= 5) sizePct = 20;
+    else if (dip >= 3) sizePct = 10;
+
+    if (sizePct === 0) {
+      // Schedule baseline DCA only if we don't already hold and haven't bought today
+      if (heldQty === 0) {
+        sizePct = 10;
+      } else {
+        continue;
+      }
+    }
+
     if (dip > bestDip) {
       bestDip = dip;
-
       const isDip = dip >= 3;
-      let sizeMultiplier = 1;
-      if (dip >= 8) sizeMultiplier = 3;
-      else if (dip >= 5) sizeMultiplier = 2;
-      if (marketFear) sizeMultiplier = Math.min(4, Math.ceil(sizeMultiplier * 1.5));
-
-      // Don't regular-DCA while already holding; only buy on dips
-      if (!isDip && heldQty > 0) continue;
-
       bestSignal = {
         symbol,
         side: "buy",
-        notional: baseAmount * sizeMultiplier,
+        notional: sizePct,
         reason: isDip
-          ? `[SmartDCA] dip ${dip.toFixed(2)}% below 20d avg $${avg20.toFixed(2)} — ${sizeMultiplier}×$${baseAmount}${marketFear ? " + fear bonus" : ""}`
-          : `[SmartDCA] scheduled DCA: ${dip.toFixed(2)}% vs avg, base $${baseAmount} buy`,
-        strategyConfidence: isDip ? 0.80 : 0.65,
+          ? `[SmartDCA] ${dip.toFixed(2)}% dip below 20d avg $${avg20.toFixed(2)} → ${sizePct}% of budget`
+          : `[SmartDCA] baseline DCA into ${symbol}: ${dip.toFixed(2)}% vs avg → ${sizePct}% of budget`,
+        strategyConfidence: isDip ? 0.85 : 0.72,
         marketData: { currentPrice, dipPct: dip },
       };
     }
@@ -896,57 +721,45 @@ export async function dcaPlus(
 
 // ─────────────────────────────────────────────────────────────
 // 6. PREDICTION PRO (prediction_arb)
-//    Universe: most-actives screener, prioritised by news overlap.
-//    Kelly Criterion: only trade when AI confidence − market prob >15%.
-//    Stocks mentioned in both most-actives AND recent news get
-//    evaluated first (event-driven catalyst).
+//    Long-only fair-value vs market price mispricing trades.
+//    Entry: AI fair-value > 10% above current price AND conf >= 0.75.
+//    Position size scales: 15% at conf 0.75 → 25% at conf 0.90.
 // ─────────────────────────────────────────────────────────────
 export async function predictionArb(
-  config: Record<string, any>,
+  _config: Record<string, any>,
   agentPositions: Record<string, number>,
-  agentAvgCost: Record<string, number> = {},
-  agentPositionOpenedAt: Record<string, string> = {},
 ): Promise<TradeSignal | null> {
   _lastStrategyDiagnostics = "[PredictionPro] fetching most-actives + news...";
-
-  const stopSignal = await checkTrailingStops(agentPositions, agentAvgCost, agentPositionOpenedAt);
-  if (stopSignal) return stopSignal;
 
   let universe = await getMostActives(10);
   if (universe.length === 0) universe = TREND_FALLBACK.slice(0, 10);
 
-  // Find symbols that appear in both most-actives AND recent news (event-driven)
   const rawNews = await getAllNews(30);
   const newsSymbols = new Set<string>();
   for (const article of rawNews) {
     for (const sym of article.symbols) newsSymbols.add(sym);
   }
-
   const withNews = universe.filter((s) => newsSymbols.has(s));
   const withoutNews = universe.filter((s) => !newsSymbols.has(s));
-  // Evaluate news-catalysts first, cap at 5 symbols total to limit Groq calls
   const sample = [...withNews, ...withoutNews].slice(0, 5);
 
   _lastStrategyDiagnostics =
-    `[PredictionPro] active=${universe.slice(0, 6).join(",")} withNews=${withNews.join(",")||"none"}`;
+    `[PredictionPro] active=${universe.slice(0, 6).join(",")} withNews=${withNews.join(",") || "none"}`;
 
-  const confidenceThreshold = Number(config.confidence_threshold ?? 70) / 100;
-  const held = heldSymbols(agentPositions);
   let bestSignal: TradeSignal | null = null;
   let bestEdge = 0;
 
   for (const symbol of sample) {
+    if ((agentPositions[symbol] ?? 0) > 0) continue;
+
     const bars = await getDailyBars(symbol, 25);
     if (bars.length < 10) continue;
-
-    // Quality filter: price >= $15, avg daily volume >= 500k
     if (!isQualityStock(bars, symbol)) continue;
 
     const closes = bars.map((b) => b.c);
     const currentPrice = closes[closes.length - 1];
     const rsi = calculateRSI(closes, 14);
     const mom5d = momentumPct(closes, 5);
-    const heldQty = agentPositions[symbol] ?? 0;
 
     const { direction, confidence, marketProbability, reasoning } = await evalMispricing({
       symbol,
@@ -955,70 +768,29 @@ export async function predictionArb(
       momentum5d: mom5d,
     });
 
-    if (direction === "hold" || confidence < confidenceThreshold) continue;
+    if (direction !== "buy") continue;
+    if (confidence < 0.75) continue;
     const edge = confidence - marketProbability;
-    if (edge < 0.15 || edge <= bestEdge) continue;
+    if (edge < 0.10) continue;
+    if (edge <= bestEdge) continue;
 
-    const kellyFraction = edge / Math.max(0.01, 1 - marketProbability);
-    const kellySizePct = Math.min(15, Math.max(2, kellyFraction * 20));
+    // Size scales linearly with confidence: 0.75 → 15%, 0.90 → 25%.
+    const scale = Math.min(1, Math.max(0, (confidence - 0.75) / 0.15));
+    const sizePct = 15 + scale * 10;
     const hasCatalyst = newsSymbols.has(symbol);
 
-    if (direction === "buy" && heldQty < 0) {
-      // Short cover: AI bullish on a symbol we're short
-      bestEdge = edge;
-      bestSignal = {
-        symbol,
-        side: "buy",
-        isShort: true,
-        notional: Math.abs(heldQty) * currentPrice,
-        reason:
-          `[PredictionPro] SHORT COVER: bullish AI ${(confidence * 100).toFixed(0)}% vs market ${(marketProbability * 100).toFixed(0)}% ` +
-          `(edge ${(edge * 100).toFixed(0)}%): ${reasoning}` +
-          (hasCatalyst ? " [news catalyst]" : ""),
-        strategyConfidence: confidence,
-        marketData: { currentPrice, rsi },
-      };
-    } else if (direction === "buy" && heldQty === 0) {
-      bestEdge = edge;
-      bestSignal = {
-        symbol,
-        side: "buy",
-        notional: kellySizePct,
-        reason:
-          `[PredictionPro] AI ${(confidence * 100).toFixed(0)}% vs market ${(marketProbability * 100).toFixed(0)}% ` +
-          `(Kelly edge ${(edge * 100).toFixed(0)}%, size ${kellySizePct.toFixed(1)}%): ${reasoning}` +
-          (hasCatalyst ? " [news catalyst]" : ""),
-        strategyConfidence: confidence,
-        marketData: { currentPrice, rsi },
-      };
-    } else if (direction === "sell" && heldQty > 0) {
-      bestEdge = edge;
-      bestSignal = {
-        symbol,
-        side: "sell",
-        notional: heldQty * currentPrice,
-        reason:
-          `[PredictionPro] overpriced AI ${(confidence * 100).toFixed(0)}% vs market ${(marketProbability * 100).toFixed(0)}% ` +
-          `(edge ${(edge * 100).toFixed(0)}%): ${reasoning}`,
-        strategyConfidence: confidence,
-        marketData: { currentPrice, rsi },
-      };
-    } else if (direction === "sell" && heldQty === 0) {
-      // Short entry: AI bearish with high confidence
-      bestEdge = edge;
-      bestSignal = {
-        symbol,
-        side: "sell",
-        isShort: true,
-        notional: kellySizePct,
-        reason:
-          `[PredictionPro] SHORT: AI ${(confidence * 100).toFixed(0)}% bearish vs market ${(marketProbability * 100).toFixed(0)}% ` +
-          `(Kelly edge ${(edge * 100).toFixed(0)}%, size ${kellySizePct.toFixed(1)}%): ${reasoning}` +
-          (hasCatalyst ? " [news catalyst]" : ""),
-        strategyConfidence: confidence,
-        marketData: { currentPrice, rsi },
-      };
-    }
+    bestEdge = edge;
+    bestSignal = {
+      symbol,
+      side: "buy",
+      notional: sizePct,
+      reason:
+        `[PredictionPro] AI ${(confidence * 100).toFixed(0)}% vs market ${(marketProbability * 100).toFixed(0)}% ` +
+        `(edge ${(edge * 100).toFixed(0)}%, size ${sizePct.toFixed(0)}%): ${reasoning}` +
+        (hasCatalyst ? " [news catalyst]" : ""),
+      strategyConfidence: confidence,
+      marketData: { currentPrice, rsi },
+    };
   }
 
   _lastStrategyDiagnostics += ` | bestEdge=${bestEdge.toFixed(2)}`;
@@ -1028,15 +800,12 @@ export async function predictionArb(
 
 // ─────────────────────────────────────────────────────────────
 // 7. YOUR RULES (custom)
-//    Universe: most-actives screener — dynamic, high-liquidity names
-//    User's plain-English strategy_prompt evaluated by Groq with
-//    live market data for each symbol. Confidence threshold: 0.70.
+//    User's plain-English strategy_prompt evaluated by Groq.
+//    Global rules apply (long-only, $20/1M, 25%, conf 0.70).
 // ─────────────────────────────────────────────────────────────
 export async function customStrategy(
   config: Record<string, any>,
   agentPositions: Record<string, number>,
-  agentAvgCost: Record<string, number> = {},
-  agentPositionOpenedAt: Record<string, string> = {},
 ): Promise<TradeSignal | null> {
   const strategyPrompt = (config.strategy_prompt as string | undefined)?.trim().slice(0, 500);
   if (!strategyPrompt || strategyPrompt.length < 10) {
@@ -1046,9 +815,6 @@ export async function customStrategy(
   }
 
   _lastStrategyDiagnostics = "[YourRules] fetching most-actives universe...";
-
-  const stopSignal = await checkTrailingStops(agentPositions, agentAvgCost, agentPositionOpenedAt);
-  if (stopSignal) return stopSignal;
 
   let universe = await getMostActives(10);
   if (universe.length === 0) universe = TREND_FALLBACK.slice(0, 10);
@@ -1068,7 +834,6 @@ export async function customStrategy(
     try {
       const bars = await getDailyBars(symbol, 25);
       if (bars.length < 20) continue;
-      // Quality filter: price >= $15, avg daily volume >= 500k
       if (!isQualityStock(bars, symbol)) continue;
       const closes = bars.map((b) => b.c);
       const currentPrice = closes[closes.length - 1];
@@ -1100,65 +865,29 @@ export async function customStrategy(
     currentPositions: agentPositions,
   });
 
-  if (!execute || !symbol || confidence < 0.70) {
-    _lastStrategyDiagnostics +=
-      ` | no signal (confidence=${(confidence ?? 0).toFixed(2)})`;
+  if (!execute || !symbol || confidence < AI_CONFIDENCE_FLOOR) {
+    _lastStrategyDiagnostics += ` | no signal (conf=${(confidence ?? 0).toFixed(2)})`;
     console.log(`[customStrategy] ${_lastStrategyDiagnostics}`);
+    return null;
+  }
+
+  // Long-only: only emit buy signals on un-held names. Sells handled by exit engine.
+  if (side !== "buy") {
+    _lastStrategyDiagnostics += ` | side=${side} ignored (exits centralized)`;
     return null;
   }
 
   const symbolData = marketData.find((d) => d.symbol === symbol);
   if (!symbolData) return null;
+  if ((agentPositions[symbol] ?? 0) > 0) return null;
 
-  const heldQty = agentPositions[symbol] ?? 0;
-
-  // Short cover: strategy says buy but we're short
-  if (side === "buy" && heldQty < 0) {
-    _lastStrategyDiagnostics +=
-      ` | SHORT_COVER ${symbol} conf=${confidence.toFixed(2)}`;
-    console.log(`[customStrategy] ${_lastStrategyDiagnostics}`);
-    return {
-      symbol,
-      side: "buy",
-      isShort: true,
-      notional: Math.abs(heldQty) * symbolData.currentPrice,
-      reason: `[YourRules] SHORT COVER confidence ${(confidence * 100).toFixed(0)}%: ${reasoning}`,
-      strategyConfidence: confidence,
-      marketData: { currentPrice: symbolData.currentPrice, rsi: symbolData.rsi14 },
-    };
-  }
-
-  if (side === "buy" && heldQty > 0) return null; // already long
-
-  // Short entry: strategy says sell but we don't hold the stock
-  if (side === "sell" && heldQty === 0) {
-    // Only short if the user's instructions explicitly mention shorting
-    const allowsShort = /\bshort\b/i.test(strategyPrompt);
-    if (!allowsShort) return null;
-    _lastStrategyDiagnostics +=
-      ` | SHORT_ENTRY ${symbol} conf=${confidence.toFixed(2)}`;
-    console.log(`[customStrategy] ${_lastStrategyDiagnostics}`);
-    return {
-      symbol,
-      side: "sell",
-      isShort: true,
-      notional: 10,
-      reason: `[YourRules] SHORT confidence ${(confidence * 100).toFixed(0)}%: ${reasoning}`,
-      strategyConfidence: confidence,
-      marketData: { currentPrice: symbolData.currentPrice, rsi: symbolData.rsi14 },
-    };
-  }
-
-  if (side === "sell" && heldQty < 0) return null; // already short
-
-  _lastStrategyDiagnostics +=
-    ` | TRADE ${side} ${symbol} conf=${confidence.toFixed(2)}`;
+  _lastStrategyDiagnostics += ` | BUY ${symbol} conf=${confidence.toFixed(2)}`;
   console.log(`[customStrategy] ${_lastStrategyDiagnostics}`);
 
   return {
     symbol,
-    side,
-    notional: side === "buy" ? 10 : heldQty * symbolData.currentPrice,
+    side: "buy",
+    notional: 20,
     reason: `[YourRules] confidence ${(confidence * 100).toFixed(0)}%: ${reasoning}`,
     strategyConfidence: confidence,
     marketData: { currentPrice: symbolData.currentPrice, rsi: symbolData.rsi14 },
@@ -1166,29 +895,21 @@ export async function customStrategy(
 }
 
 // ─────────────────────────────────────────────────────────────
-// Strategy Lab — meta-learning agent that evolves strategies
-// Runs daily at market close (4:05–4:30 PM ET)
+// 8. STRATEGY LAB (strategy_lab)
+//    Meta-learning agent. Executes graduated rules always (no time gate).
+//    Bootstraps with simple long-only rules until evolution graduates a ruleset.
 // ─────────────────────────────────────────────────────────────
-// Bug 9: Strategy Lab now trades during market hours, not just 4:00–4:45 PM.
-// The "evolution cycle" can still be scheduled separately by the runtime —
-// but the agent itself should generate trades like any other strategy.
 async function strategyLab(
   config: Record<string, any>,
   agentPositions: Record<string, number>,
-  agentAvgCost: Record<string, number>,
-  agentPositionOpenedAt: Record<string, string> = {},
 ): Promise<TradeSignal | null> {
-  _lastStrategyDiagnostics = "[strategy_lab] Running evolution cycle";
-  console.log(`[strategy_lab] entered — bestRules present=${!!config.best_rules}`);
+  _lastStrategyDiagnostics = "[strategy_lab] running";
 
-  // Use the lab's best graduated rules if available, otherwise bootstrap with
-  // a default high-quality momentum + mean-reversion blend so the agent
-  // actually trades while the lab is still learning.
+  // Bootstrap ruleset — long-only, aligns with global filters ($20, 1M vol, max 3).
   const DEFAULT_BOOTSTRAP_RULES =
-    "Buy liquid large-cap stocks with strong 5-day momentum (>3%) and RSI between 40–70, " +
-    "avoiding overbought conditions. Sell when RSI exceeds 75 or the position is down more " +
-    "than 5% from entry. Only trade stocks priced above $15 with daily volume over 500k shares. " +
-    "Prefer S&P 500 names over speculative small caps.";
+    "Buy large-cap stocks (price above $20, daily volume over 1M) showing 5-day momentum >3% " +
+    "with RSI between 40-65 (not overbought). Avoid stocks up more than 4% today. " +
+    "Prefer S&P 500 names with consistent uptrends. Long-only — never short.";
 
   const bestRules = (config.best_rules as string | undefined) ?? DEFAULT_BOOTSTRAP_RULES;
   if (!config.best_rules) {
@@ -1199,14 +920,12 @@ async function strategyLab(
   return customStrategy(
     { ...config, strategy_prompt: bestRules },
     agentPositions,
-    agentAvgCost,
-    agentPositionOpenedAt,
   );
 }
 
 // ─────────────────────────────────────────────────────────────
 // Router — dispatches to the correct strategy function.
-// agentAvgCost is passed to all strategies for trailing-stop support.
+// All strategies share the same long-only signature now.
 // ─────────────────────────────────────────────────────────────
 export async function runStrategy(
   strategyId: string,
@@ -1214,24 +933,25 @@ export async function runStrategy(
   agentPositions: Record<string, number>,
   agentAvgCost: Record<string, number> = {},
   agentPositionOpenedAt: Record<string, string> = {},
+  agentLastBuyAt: Record<string, string> = {},
 ): Promise<TradeSignal | null> {
   switch (strategyId) {
     case "momentum_rider":
-      return momentumRider(config, agentPositions, agentAvgCost, agentPositionOpenedAt);
+      return momentumRider(config, agentPositions);
     case "mean_reversion":
-      return meanReversion(config, agentPositions, agentAvgCost, agentPositionOpenedAt);
+      return meanReversion(config, agentPositions);
     case "prediction_arb":
-      return predictionArb(config, agentPositions, agentAvgCost, agentPositionOpenedAt);
+      return predictionArb(config, agentPositions);
     case "dca_plus":
-      return dcaPlus(config, agentPositions, agentAvgCost, agentPositionOpenedAt);
+      return dcaPlus(config, agentPositions, agentAvgCost, agentPositionOpenedAt, agentLastBuyAt);
     case "custom":
-      return customStrategy(config, agentPositions, agentAvgCost, agentPositionOpenedAt);
+      return customStrategy(config, agentPositions);
     case "news_trader":
-      return newsTrader(config, agentPositions, agentAvgCost, agentPositionOpenedAt);
+      return newsTrader(config, agentPositions);
     case "blind_quant":
-      return blindQuant(config, agentPositions, agentAvgCost, agentPositionOpenedAt);
+      return blindQuant(config, agentPositions);
     case "strategy_lab":
-      return strategyLab(config, agentPositions, agentAvgCost, agentPositionOpenedAt);
+      return strategyLab(config, agentPositions);
     default:
       console.warn(`[runStrategy] Unknown strategy: ${strategyId}`);
       return null;

@@ -68,13 +68,11 @@ export interface TradeSignal {
    */
   skipAiConfirmation?: boolean;
   /**
-   * Short-selling flag.
-   * side="sell" + isShort=true → open a new short position (sell shares we don't own).
-   *   notional = % of budget (same as a buy).
-   * side="buy"  + isShort=true → cover an existing short position (buy back).
-   *   notional = dollar value of the short to close (same as a regular sell).
+   * True when this signal is an exit-engine signal (stop loss / take profit / time stop).
+   * Exit signals bypass the daily-trade limit and AI confirmation — risk management
+   * always takes precedence over entry pacing.
    */
-  isShort?: boolean;
+  isExit?: boolean;
 }
 
 export interface AIDecision {

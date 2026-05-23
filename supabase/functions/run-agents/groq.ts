@@ -33,7 +33,11 @@ function safeJson(raw: string): Record<string, unknown> {
 
 // ── confirmTrade ──────────────────────────────────────────────
 
-/** Ask the AI to validate a trade signal. Returns { execute, reasoning, confidence }. */
+/**
+ * Ask the AI to validate a trade signal.
+ * STRICT: if Groq fails or returns conservative-mode, returns execute=false.
+ * No fallback execution — better to skip than to trade on a stale/weak signal.
+ */
 export async function confirmTrade(opts: {
   strategy: string;
   symbol: string;
@@ -44,13 +48,8 @@ export async function confirmTrade(opts: {
   rsi?: number;
   dipPct?: number;
 }): Promise<{ execute: boolean; reasoning: string; confidence: number }> {
-  // Conservative mode: auto-approve technically-valid signals to preserve budget
   if (isConservativeMode()) {
-    return {
-      execute:    true,
-      reasoning:  "Conservative mode: AI check skipped, technical signal accepted",
-      confidence: 0.75,
-    };
+    return { execute: false, reasoning: "Conservative mode — trade skipped", confidence: 0 };
   }
 
   const facts = [
@@ -93,15 +92,10 @@ export async function confirmTrade(opts: {
     };
   } catch (err: any) {
     if (err?.message === "CONSERVATIVE_MODE") {
-      return { execute: true, reasoning: "Budget conserved — technical signal accepted", confidence: 0.75 };
+      return { execute: false, reasoning: "Conservative mode — trade skipped", confidence: 0 };
     }
-    // Groq unavailable — execute the trade on strategy signal alone
     console.error(`[confirmTrade] Groq failed for ${opts.symbol} ${opts.side}:`, err?.message ?? err);
-    return {
-      execute:    true,
-      reasoning:  "AI unavailable — using strategy signal only",
-      confidence: 0.50,
-    };
+    return { execute: false, reasoning: "AI unavailable — trade skipped", confidence: 0 };
   }
 }
 
@@ -323,18 +317,19 @@ export interface AnonAsset {
   price_change_20d_pct: number;
   volume_vs_avg_20d: number;
   rsi_14: number;
-  distance_from_20d_high_pct: number;
-  distance_from_20d_low_pct: number;
+  bollinger_position: number;
   volatility_20d: number;
   sma_20_slope: number;
-  bollinger_position: number;
+  distance_from_52w_high_pct: number;
+  distance_from_52w_low_pct: number;
+  atr_14: number;
 }
 
 export async function blindQuantDecision(opts: {
   assets: AnonAsset[];
   heldAssetIds: string[];
-  shortedAssetIds: string[];
   minConfidence: number;
+  spyChange1dPct: number;
 }): Promise<{
   execute: boolean;
   asset_id: string;
@@ -349,32 +344,33 @@ export async function blindQuantDecision(opts: {
     .map((a) =>
       `${a.asset_id}: 1d=${a.price_change_1d_pct.toFixed(2)}% 5d=${a.price_change_5d_pct.toFixed(2)}% ` +
       `20d=${a.price_change_20d_pct.toFixed(2)}% vol=${a.volume_vs_avg_20d.toFixed(2)}x ` +
-      `RSI=${a.rsi_14.toFixed(0)} hi%=${a.distance_from_20d_high_pct.toFixed(2)} lo%=${a.distance_from_20d_low_pct.toFixed(2)} ` +
-      `bb=${a.bollinger_position.toFixed(2)} slope=${a.sma_20_slope.toFixed(4)} σ=${a.volatility_20d.toFixed(3)}`
+      `RSI=${a.rsi_14.toFixed(0)} bb=${a.bollinger_position.toFixed(2)} ` +
+      `σ=${a.volatility_20d.toFixed(3)} slope=${a.sma_20_slope.toFixed(4)} ` +
+      `52wHi%=${a.distance_from_52w_high_pct.toFixed(1)} 52wLo%=${a.distance_from_52w_low_pct.toFixed(1)} ` +
+      `ATR=${a.atr_14.toFixed(2)}`
     )
     .join("\n");
 
-  const held    = opts.heldAssetIds.join(",")  || "none";
-  const shorted = opts.shortedAssetIds.join(",") || "none";
+  const held = opts.heldAssetIds.join(",") || "none";
   const validIds = opts.assets.map((a) => a.asset_id).join(", ");
 
   const systemPrompt =
-    "You are a pure quantitative trading AI. Analyse ONLY the numbers provided — no company names, no tickers, no news. " +
-    "You can go long (buy) OR short (sell) based on the data. " +
+    "You are a pure quantitative LONG-ONLY trading AI. Analyse ONLY the numbers provided — no company names, no tickers, no news. " +
+    "You can only go long (buy) or close a long (sell). No short selling. " +
     "Output ONLY a raw JSON object — no markdown, no code fences, no explanation.";
 
   const userPrompt =
+    `Market regime: SPY 1d change = ${opts.spyChange1dPct.toFixed(2)}%\n\n` +
     `Anonymous assets (pure numbers — no ticker identities):\n${assetBlock}\n\n` +
     `Currently long: ${held}\n` +
-    `Currently short: ${shorted}\n` +
     `Minimum confidence to act: ${opts.minConfidence.toFixed(1)}\n` +
     `Valid asset IDs: ${validIds}\n` +
-    `Which asset has the best quantitative risk/reward setup? Choose "buy" for bullish or "sell" for bearish.\n` +
-    `Rules: Do NOT buy an asset already in "Currently long". Do NOT sell an asset already in "Currently short".\n` +
+    `Pick the ONE asset with the best quantitative LONG setup, OR pick a held asset to close ("sell").\n` +
+    `Rules: Do NOT buy an asset already in "Currently long". Only "sell" assets in "Currently long".\n` +
     `Output ONLY raw JSON:\n` +
     `{"execute":<true or false>,"asset_id":"<one of the valid IDs>","side":"buy or sell","reasoning":"<20 words citing specific numbers>","confidence":<0.0 to 1.0>}`;
 
-  console.log(`[blindQuantDecision] assets=${opts.assets.length} held=${held} minConf=${opts.minConfidence}`);
+  console.log(`[blindQuantDecision] assets=${opts.assets.length} held=${held} minConf=${opts.minConfidence} spy=${opts.spyChange1dPct.toFixed(2)}%`);
 
   try {
     const raw = await groqComplete(
