@@ -4,6 +4,13 @@ All notable changes to this project are documented here. Newest entries at the t
 
 ---
 
+## [2026-05-25] — Fix rpc().catch TypeError killing agent runs
+
+- `index.ts:496`: replaced `.rpc(...).catch(...)` (invalid — Supabase RPC builder has no `.catch`) with `await`+ try/catch. The uncaught `TypeError: supabase.rpc(...).catch is not a function` was aborting every successful trade run before `logExecution(action="traded")` could fire, causing every trade to be logged as an error in `agent_logs`.
+- Grepped entire `supabase/functions/run-agents/` folder — no other `.rpc(...).catch(` or `.rpc(...).then(` patterns found.
+
+---
+
 ## [2026-05-25] — Housekeeping: track handoff doc + fix web useNativeDriver warnings
 
 - **AGENTVAULT_HANDOFF.md**: added to repo so planner context survives across sessions.

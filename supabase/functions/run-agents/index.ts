@@ -493,9 +493,12 @@ async function executeSignal(
     { onConflict: "user_id,agent_id,snapshot_date" }
   );
 
-  supabase.rpc("rpc_calculate_portfolio_value", { p_user_id: agent.user_id }).catch((err) => {
+  try {
+    const { error: pvErr } = await supabase.rpc("rpc_calculate_portfolio_value", { p_user_id: agent.user_id });
+    if (pvErr) console.warn("[rpc_calculate_portfolio_value] Non-fatal error:", pvErr.message);
+  } catch (err) {
     console.warn("[rpc_calculate_portfolio_value] Non-fatal error:", err);
-  });
+  }
 
   const executionResult: ExecutionResult = {
     ...base,
