@@ -4,6 +4,15 @@ All notable changes to this project are documented here. Newest entries at the t
 
 ---
 
+## [2026-05-25] — Housekeeping: track handoff doc + fix web useNativeDriver warnings
+
+- **AGENTVAULT_HANDOFF.md**: added to repo so planner context survives across sessions.
+- **OfflineBanner**: `useNativeDriver: Platform.OS !== "web"` (was `true`); added `Platform` import.
+- **LoadingSkeleton**: both `useNativeDriver: true` calls in the shimmer loop → `Platform.OS !== "web"`.
+- **PermissionModal**: added `if (Platform.OS === "web") return;` at top of animation `useEffect` — component already returns null on web but the effect ran first, producing four console warnings per page load.
+
+---
+
 ## [2026-05-25] — UI bug bundle: privacy mode, chart legend, deploy name, social feed, follow-own-agents
 
 - **Privacy mode**: eye-icon toggle now also redacts holdings current value + P&L, StatsGrid money cards (Avg P&L, Best/Worst Trade), and per-agent dollar P&L on agent cards. Non-money values (%, trade counts, symbols) remain visible.

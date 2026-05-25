@@ -52,6 +52,7 @@ export function PermissionModal({ visible, onAllow, onSkip }: Props) {
   const fadeAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
+    if (Platform.OS === "web") return;
     if (visible) {
       Animated.parallel([
         Animated.spring(slideAnim, {

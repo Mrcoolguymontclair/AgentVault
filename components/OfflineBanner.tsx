@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from "react";
-import { View, Text, Animated } from "react-native";
+import { View, Text, Animated, Platform } from "react-native";
 import NetInfo from "@react-native-community/netinfo";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -20,7 +20,7 @@ export function OfflineBanner() {
   useEffect(() => {
     Animated.spring(slideAnim, {
       toValue: isOffline ? 0 : -60,
-      useNativeDriver: true,
+      useNativeDriver: Platform.OS !== "web",
       damping: 18,
       stiffness: 300,
     }).start();

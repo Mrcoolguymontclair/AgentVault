@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from "react";
-import { View, Animated, ViewStyle } from "react-native";
+import { View, Animated, ViewStyle, Platform } from "react-native";
 import { useTheme } from "@/hooks/useTheme";
 
 interface SkeletonProps {
@@ -19,12 +19,12 @@ export function Skeleton({ width = "100%", height = 16, borderRadius = 8, style 
         Animated.timing(shimmer, {
           toValue: 1,
           duration: 900,
-          useNativeDriver: true,
+          useNativeDriver: Platform.OS !== "web",
         }),
         Animated.timing(shimmer, {
           toValue: 0,
           duration: 900,
-          useNativeDriver: true,
+          useNativeDriver: Platform.OS !== "web",
         }),
       ])
     );
