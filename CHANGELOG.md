@@ -4,6 +4,44 @@ All notable changes to this project are documented here. Newest entries at the t
 
 ---
 
+## [2026-05-25] — UI bug bundle: privacy mode, chart legend, deploy name, social feed, follow-own-agents
+
+- **Privacy mode**: eye-icon toggle now also redacts holdings current value + P&L, StatsGrid money cards (Avg P&L, Best/Worst Trade), and per-agent dollar P&L on agent cards. Non-money values (%, trade counts, symbols) remain visible.
+- **Chart legend**: SPY overlay now shows a two-item inline legend ("Portfolio" solid dot / "S&P 500" dashed line) below the chart — only visible when the overlay is active.
+- **Deploy name**: name field now defaults to the first suggestion from the selected strategy's `nameSuggestions` that doesn't already exist in the user's agents (deterministic, not random). Falls back to numeric suffix if all suggestions collide.
+- **Social feed**: `fetchTradeFeed` now client-sorts results by `executed_at` DESC so the feed shows the most recent trades across all agents, not stale ones.
+- **Follow own agents**: `DiscoverAgentCard` now receives `isOwnAgent` prop; own agents show "(yours)" label instead of the Follow button as a defensive check on top of the existing server-side filter.
+
+---
+
+## [2026-05-25] — Fix trade count mismatch (Performance section)
+
+- Migration 024: `rpc_get_portfolio_stats` now returns both `total_trades` (all rows) and `closed_trades` (sells/covers with realized P&L). Win rate, avg P&L, Sharpe, drawdown still compute from closed trades only.
+- `PortfolioStats` type: added `closedTrades` field alongside existing `totalTrades`.
+- `fetchPortfolioStats`: maps both new columns from the RPC response.
+- Performance section "Total Trades" card now shows "77 total / 4 closed" format.
+- Run migration 024 in Supabase SQL Editor. No edge function redeploy needed.
+
+---
+
+## [2026-05-25] — Fix closeAllShorts not logging cover trades
+
+- `closeAllShorts` now inserts a trade row via `rpc_insert_trade` and calls `rpc_update_agent_stats` for every successful Alpaca cover. P&L computed as `(short_entry_price - cover_fill_price) * qty`.
+- Signature updated to accept `supabase` client as first arg; call site updated.
+- Logging failures are non-fatal (errors logged, tick continues).
+- Redeploy: `supabase functions deploy run-agents --no-verify-jwt`
+
+---
+
+## [2026-05-25] — Fix sell P&L = $0 (P1 root cause)
+
+- New migration `023_sell_pnl_fix.sql`: adds `rpc_get_agent_avg_cost`, `rpc_insert_trade`, and backfills all historical $0 sell rows via FIFO weighted-avg, then refreshes agent stats
+- `supabase/functions/run-agents/index.ts`: sell P&L now sourced from `rpc_get_agent_avg_cost` (SQL single source of truth); falls back to Alpaca `avg_entry_price`; throws loudly instead of writing `pnl=0` when avg cost is unresolvable
+- Trade insert replaced with `rpc_insert_trade` — no more `.from("trades")`, no retry dance
+- **Run migration 023** in Supabase SQL Editor, then redeploy: `supabase functions deploy run-agents --no-verify-jwt`
+
+---
+
 ## [2026-05-23] — COMPLETE STRATEGY OVERHAUL — Long-only + exit engine
 
 After one month live with only News Trader profitable, all 8 strategies were

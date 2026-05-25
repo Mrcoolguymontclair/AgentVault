@@ -93,14 +93,16 @@ export function DeploySheet({ visible, onClose, onDeployed }: Props) {
     const defaults: Record<string, number> = {};
     s.params.forEach((p) => { defaults[p.key] = p.default; });
     setParams(defaults);
-    // Suggest a unique name (avoid reusing names of existing agents)
-    const suggestion = s.nameSuggestions[Math.floor(Math.random() * s.nameSuggestions.length)];
-    const existingNames = agents.map((a) => a.name);
-    let finalName = suggestion;
-    if (existingNames.includes(finalName)) {
+    // Pick first suggestion that doesn't already appear in the user's agents.
+    const existingNames = new Set(agents.map((a) => a.name));
+    let finalName = s.nameSuggestions[0];
+    for (const candidate of s.nameSuggestions) {
+      if (!existingNames.has(candidate)) { finalName = candidate; break; }
+    }
+    if (existingNames.has(finalName)) {
       let n = 2;
-      while (existingNames.includes(`${suggestion} ${n}`)) n++;
-      finalName = `${suggestion} ${n}`;
+      while (existingNames.has(`${finalName} ${n}`)) n++;
+      finalName = `${finalName} ${n}`;
     }
     setAgentName(finalName);
     setStep(2);

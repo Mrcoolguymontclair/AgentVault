@@ -101,7 +101,9 @@ export async function fetchTradeFeed(
 
   if (error) return { data: [], error: error.message };
   return {
-    data: ((data as RawFeedTrade[]) ?? []).map(mapRawTrade),
+    data: ((data as RawFeedTrade[]) ?? [])
+      .map(mapRawTrade)
+      .sort((a, b) => new Date(b.executed_at).getTime() - new Date(a.executed_at).getTime()),
     error: null,
   };
 }

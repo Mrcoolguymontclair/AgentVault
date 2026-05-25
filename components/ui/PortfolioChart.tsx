@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from "react";
-import { View, Text, Animated, Platform } from "react-native";
+import { View, Text, Animated, Platform, StyleSheet } from "react-native";
 import Svg, {
   Path,
   Defs,
@@ -261,6 +261,7 @@ export function PortfolioChart({ data, width, isPositive, isDark, loading, spyDa
   const svgTextColor = isDark ? Colors.dark.textTertiary : Colors.light.textTertiary;
 
   return (
+  <View>
     <Animated.View style={{ height: CHART_HEIGHT, opacity: animOpacity }}>
       <Svg width={width} height={CHART_HEIGHT}>
         <Defs>
@@ -362,5 +363,58 @@ export function PortfolioChart({ data, width, isPositive, isDark, loading, spyDa
         })}
       </Svg>
     </Animated.View>
+
+    {/* SPY legend — only visible when overlay is on */}
+    {showSpy && spyLinePath && (
+      <View style={styles.legend}>
+        <View style={styles.legendItem}>
+          <View style={[styles.legendDot, { backgroundColor: chartColor }]} />
+          <Text style={[styles.legendLabel, { color: isDark ? "rgba(255,255,255,0.6)" : "rgba(0,0,0,0.5)" }]}>
+            Portfolio
+          </Text>
+        </View>
+        <View style={styles.legendItem}>
+          <View
+            style={[
+              styles.legendDash,
+              { backgroundColor: isDark ? "rgba(200,200,200,0.5)" : "rgba(100,100,100,0.4)" },
+            ]}
+          />
+          <Text style={[styles.legendLabel, { color: isDark ? "rgba(255,255,255,0.6)" : "rgba(0,0,0,0.5)" }]}>
+            S&P 500
+          </Text>
+        </View>
+      </View>
+    )}
+  </View>
   );
 }
+
+const styles = StyleSheet.create({
+  legend: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    gap: 14,
+    paddingHorizontal: 4,
+    paddingTop: 4,
+  },
+  legendItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+  },
+  legendDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  legendDash: {
+    width: 14,
+    height: 2,
+    borderRadius: 1,
+  },
+  legendLabel: {
+    fontSize: 10,
+    fontWeight: "600",
+  },
+});

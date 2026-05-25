@@ -239,12 +239,14 @@ function DiscoverAgentCard({
   entry,
   colors,
   isFollowing,
+  isOwnAgent,
   onFollow,
   onPress,
 }: {
   entry: AgentLeaderboardEntry;
   colors: any;
   isFollowing: boolean;
+  isOwnAgent: boolean;
   onFollow: () => void;
   onPress: () => void;
 }) {
@@ -321,30 +323,34 @@ function DiscoverAgentCard({
         >
           {formatPercent(entry.pnl_pct)}
         </Text>
-        <Pressable
-          onPress={(e) => {
-            e.stopPropagation();
-            onFollow();
-          }}
-          style={{
-            paddingHorizontal: 12,
-            paddingVertical: 5,
-            borderRadius: 8,
-            backgroundColor: isFollowing ? Colors.accentBg : colors.cardSecondary,
-            borderWidth: 1,
-            borderColor: isFollowing ? Colors.accent : colors.cardBorder,
-          }}
-        >
-          <Text
+        {isOwnAgent ? (
+          <Text style={{ color: colors.textTertiary, fontSize: 12, fontWeight: "600" }}>(yours)</Text>
+        ) : (
+          <Pressable
+            onPress={(e) => {
+              e.stopPropagation();
+              onFollow();
+            }}
             style={{
-              color: isFollowing ? Colors.accentLight : colors.textSecondary,
-              fontWeight: "700",
-              fontSize: 12,
+              paddingHorizontal: 12,
+              paddingVertical: 5,
+              borderRadius: 8,
+              backgroundColor: isFollowing ? Colors.accentBg : colors.cardSecondary,
+              borderWidth: 1,
+              borderColor: isFollowing ? Colors.accent : colors.cardBorder,
             }}
           >
-            {isFollowing ? "Following" : "Follow"}
-          </Text>
-        </Pressable>
+            <Text
+              style={{
+                color: isFollowing ? Colors.accentLight : colors.textSecondary,
+                fontWeight: "700",
+                fontSize: 12,
+              }}
+            >
+              {isFollowing ? "Following" : "Follow"}
+            </Text>
+          </Pressable>
+        )}
       </View>
     </Pressable>
   );
@@ -677,6 +683,7 @@ export default function SocialScreen() {
                 entry={item}
                 colors={colors}
                 isFollowing={followedAgentIds.has(item.id)}
+                isOwnAgent={item.user_id === authUser?.id}
                 onFollow={() => handleFollow(item.id)}
                 onPress={() => router.push(`/agent/${item.id}`)}
               />

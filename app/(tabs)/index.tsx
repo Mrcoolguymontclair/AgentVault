@@ -916,7 +916,7 @@ export default function HomeScreen() {
               >
                 {holdings.map((h, i) => (
                   <View key={h.symbol}>
-                    <HoldingRow holding={h} colors={colors} isDark={isDark} />
+                    <HoldingRow holding={h} colors={colors} isDark={isDark} balanceVisible={balanceVisible} />
                     {i < holdings.length - 1 && (
                       <View style={{ height: 1, backgroundColor: colors.divider, marginHorizontal: 16 }} />
                     )}
@@ -937,7 +937,7 @@ export default function HomeScreen() {
           {statsLoading ? (
             <StatsSkeleton colors={colors} />
           ) : stats && (stats.totalTrades > 0 || holdings.length > 0) ? (
-            <StatsGrid stats={stats} holdings={holdings} colors={colors} />
+            <StatsGrid stats={stats} holdings={holdings} colors={colors} balanceVisible={balanceVisible} />
           ) : (
             <View
               style={{
@@ -1007,6 +1007,7 @@ export default function HomeScreen() {
                 pnlHistory={agentPnlHistory[agent.id]}
                 colors={colors}
                 isDark={isDark}
+                balanceVisible={balanceVisible}
                 onPress={() => router.push(`/agent/${agent.id}` as any)}
               />
             ))
@@ -1168,7 +1169,7 @@ export default function HomeScreen() {
 }
 
 // ─── HoldingRow ───────────────────────────────────────────────────────────────
-function HoldingRow({ holding, colors, isDark }: { holding: Holding; colors: any; isDark: boolean }) {
+function HoldingRow({ holding, colors, isDark, balanceVisible }: { holding: Holding; colors: any; isDark: boolean; balanceVisible: boolean }) {
   const isShort  = holding.totalQuantity < 0;
   const absQty   = Math.abs(holding.totalQuantity);
   const isProfitable = holding.unrealizedPnl >= 0;
@@ -1259,7 +1260,7 @@ function HoldingRow({ holding, colors, isDark }: { holding: Holding; colors: any
             <Text style={{ color: colors.textTertiary, fontSize: 11 }}>exposure</Text>
           )}
           <Text style={{ color: colors.text, fontWeight: "700", fontSize: 14 }}>
-            {formatCurrency(displayValue)}
+            {balanceVisible ? formatCurrency(displayValue) : "••••"}
           </Text>
         </View>
         <View
@@ -1271,8 +1272,9 @@ function HoldingRow({ holding, colors, isDark }: { holding: Holding; colors: any
           }}
         >
           <Text style={{ color: pnlColor, fontSize: 11, fontWeight: "700" }}>
-            {isProfitable ? "+" : ""}{formatCurrency(holding.unrealizedPnl, true)}{" "}
-            ({isProfitable ? "+" : ""}{holding.unrealizedPnlPct.toFixed(2)}%)
+            {balanceVisible
+              ? `${isProfitable ? "+" : ""}${formatCurrency(holding.unrealizedPnl, true)} (${isProfitable ? "+" : ""}${holding.unrealizedPnlPct.toFixed(2)}%)`
+              : "••••"}
           </Text>
         </View>
       </View>
@@ -1380,7 +1382,7 @@ function AllocationBar({ holdings, totalValue, colors }: {
 }
 
 // ─── StatsGrid ────────────────────────────────────────────────────────────────
-function StatsGrid({ stats, holdings, colors }: { stats: PortfolioStats; holdings: Holding[]; colors: any }) {
+function StatsGrid({ stats, holdings, colors, balanceVisible }: { stats: PortfolioStats; holdings: Holding[]; colors: any; balanceVisible: boolean }) {
   // ── Position-based fallback metrics (used when no closed trades yet) ────────
   const profitablePositions = holdings.filter((h) => h.unrealizedPnl > 0);
   const posWinRate = holdings.length > 0 ? (profitablePositions.length / holdings.length) * 100 : 0;
@@ -1459,7 +1461,7 @@ function StatsGrid({ stats, holdings, colors }: { stats: PortfolioStats; holding
     {
       icon: "cash-outline",
       label: stats.avgTradePnl !== 0 ? "Avg Trade P&L" : "Avg Position P&L",
-      value: formatCurrency(effectiveAvgPnl, true),
+      value: balanceVisible ? formatCurrency(effectiveAvgPnl, true) : "••••",
       valueColor: effectiveAvgPnl >= 0 ? Colors.success : Colors.danger,
       iconColor: effectiveAvgPnl >= 0 ? Colors.success : Colors.danger,
       iconBg: effectiveAvgPnl >= 0 ? Colors.successBg : Colors.dangerBg,
@@ -1468,9 +1470,9 @@ function StatsGrid({ stats, holdings, colors }: { stats: PortfolioStats; holding
     {
       icon: "arrow-up-circle-outline",
       label: "Best Trade",
-      value: effectiveBestSymbol !== "—"
-        ? `${effectiveBestSymbol} +${formatCurrency(effectiveBestPnl, true)}`
-        : "—",
+      value: balanceVisible
+        ? (effectiveBestSymbol !== "—" ? `${effectiveBestSymbol} +${formatCurrency(effectiveBestPnl, true)}` : "—")
+        : "••••",
       valueColor: Colors.success,
       iconColor: Colors.success,
       iconBg: Colors.successBg,
@@ -1479,9 +1481,9 @@ function StatsGrid({ stats, holdings, colors }: { stats: PortfolioStats; holding
     {
       icon: "arrow-down-circle-outline",
       label: "Worst Trade",
-      value: effectiveWorstSymbol !== "—"
-        ? `${effectiveWorstSymbol} ${formatCurrency(effectiveWorstPnl, true)}`
-        : "—",
+      value: balanceVisible
+        ? (effectiveWorstSymbol !== "—" ? `${effectiveWorstSymbol} ${formatCurrency(effectiveWorstPnl, true)}` : "—")
+        : "••••",
       valueColor: Colors.danger,
       iconColor: Colors.danger,
       iconBg: Colors.dangerBg,
@@ -1490,11 +1492,11 @@ function StatsGrid({ stats, holdings, colors }: { stats: PortfolioStats; holding
     {
       icon: "swap-horizontal-outline",
       label: "Total Trades",
-      value: `${stats.totalTrades}`,
+      value: `${stats.totalTrades} total / ${stats.closedTrades} closed`,
       valueColor: colors.text,
       iconColor: Colors.accentLight,
       iconBg: Colors.accentBg,
-      hint: "All-time executions",
+      hint: "All executions / realized P&L trades",
     },
     {
       icon: "calendar-outline",
@@ -1693,13 +1695,14 @@ function QuickAction({
   );
 }
 
-function AgentCard({ agent, blendedPnl, maxDDPct, pnlHistory, colors, isDark, onPress }: {
+function AgentCard({ agent, blendedPnl, maxDDPct, pnlHistory, colors, isDark, balanceVisible, onPress }: {
   agent: Agent;
   blendedPnl?: { pnl: number; pnlPct: number };
   maxDDPct?: number;
   pnlHistory?: number[];
   colors: any;
   isDark: boolean;
+  balanceVisible: boolean;
   onPress: () => void;
 }) {
   const dotColor = STATUS_DOT[agent.status] ?? colors.textTertiary;
@@ -1744,11 +1747,17 @@ function AgentCard({ agent, blendedPnl, maxDDPct, pnlHistory, colors, isDark, on
           </View>
         </View>
         <View style={{ alignItems: "flex-end", gap: 4 }}>
-          <AnimatedNumber
-            value={displayPnl}
-            formatter={(v) => formatCurrency(v, true)}
-            style={{ color: displayPnl >= 0 ? Colors.success : Colors.danger, fontWeight: "800", fontSize: 16 }}
-          />
+          {balanceVisible ? (
+            <AnimatedNumber
+              value={displayPnl}
+              formatter={(v) => formatCurrency(v, true)}
+              style={{ color: displayPnl >= 0 ? Colors.success : Colors.danger, fontWeight: "800", fontSize: 16 }}
+            />
+          ) : (
+            <Text style={{ color: displayPnl >= 0 ? Colors.success : Colors.danger, fontWeight: "800", fontSize: 16 }}>
+              ••••
+            </Text>
+          )}
           <Text style={{ color: displayPnl >= 0 ? Colors.success : Colors.danger, fontSize: 12, fontWeight: "600" }}>
             {formatPercent(displayPnlPct)}
           </Text>

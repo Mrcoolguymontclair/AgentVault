@@ -111,7 +111,15 @@ Deno.serve(async (req) => {
         clearAlpacaKeys();
       }
 
-      const alpacaPositions = await getPositions();
+      let alpacaPositions = await getPositions();
+
+      // ── One-time short-position cleanup ─────────────────────
+      // Short selling is permanently disabled. Any negative-qty position left
+      // over from the pre-overhaul code is force-closed here before the agent
+      // runs its normal cycle. This runs every tick — once positions are flat
+      // it becomes a no-op.
+      await closeAllShorts(supabase, alpacaPositions, agent);
+      alpacaPositions = await getPositions();
 
       try {
         const { data: customKeyData } = await supabase.rpc("rpc_get_key_for_agent", {
@@ -409,47 +417,42 @@ async function executeSignal(
   // ── P&L ─────────────────────────────────────────────────
   let tradePnl = 0;
   if (signal.side === "sell") {
-    let avgCost = agentAvgCost[signal.symbol] ?? 0;
+    const { data: sqlAvgCost } = await supabase.rpc("rpc_get_agent_avg_cost", {
+      p_agent_id: agent.id,
+      p_symbol: signal.symbol,
+    });
     const alpacaAvgPrice = Number(alpacaPositions[signal.symbol]?.avg_entry_price ?? 0);
-    if (avgCost <= 0 && alpacaAvgPrice > 0) {
-      console.log(`[pnl] SELL ${signal.symbol}: local avgCost missing — using Alpaca avg_entry_price $${alpacaAvgPrice.toFixed(2)}`);
+
+    let avgCost: number | null = null;
+    if (sqlAvgCost != null && Number(sqlAvgCost) > 0) {
+      avgCost = Number(sqlAvgCost);
+      console.log(`[pnl] SELL ${signal.symbol}: SQL avg cost $${avgCost.toFixed(2)}`);
+    } else if (alpacaAvgPrice > 0) {
       avgCost = alpacaAvgPrice;
-    }
-    if (avgCost > 0) {
-      tradePnl = (fillPrice - avgCost) * qty;
-      console.log(`[pnl] SELL ${signal.symbol}: ($${fillPrice.toFixed(2)} - $${avgCost.toFixed(2)}) × ${qty} = $${tradePnl.toFixed(2)}`);
+      console.log(`[pnl] SELL ${signal.symbol}: SQL avg cost missing — using Alpaca avg_entry_price $${avgCost.toFixed(2)}`);
     } else {
-      console.error(`[pnl] SELL ${signal.symbol}: avg cost missing in BOTH local AND Alpaca — pnl recorded as $0`);
+      console.error(`[pnl] SELL ${signal.symbol} (agent: ${agent.name}): avg cost unresolvable from both SQL and Alpaca.`);
+      throw new Error(`[pnl] SELL ${signal.symbol} (agent: ${agent.name}): avg cost unresolvable from both SQL and Alpaca.`);
     }
+
+    tradePnl = (fillPrice - avgCost) * qty;
+    console.log(`[pnl] SELL ${signal.symbol}: ($${fillPrice.toFixed(2)} - $${avgCost.toFixed(2)}) × ${qty} = $${tradePnl.toFixed(2)}`);
   }
 
   // ── Log trade ───────────────────────────────────────────
-  const baseTradeRow = {
-    agent_id: agent.id,
-    user_id: agent.user_id,
-    symbol: signal.symbol,
-    side: signal.side,
-    quantity: qty,
-    price: fillPrice,
-    pnl: tradePnl,
-    executed_at: new Date().toISOString(),
-  };
+  const { error: tradeErr } = await supabase.rpc("rpc_insert_trade", {
+    p_agent_id:        agent.id,
+    p_user_id:         agent.user_id,
+    p_symbol:          signal.symbol,
+    p_side:            signal.side,
+    p_quantity:        qty,
+    p_price:           fillPrice,
+    p_pnl:             tradePnl,
+    p_alpaca_order_id: alpacaOrderId ?? null,
+    p_order_status:    orderStatus ?? null,
+  });
 
-  const { error: tradeErr } = await supabase.from("trades").insert(
-    alpacaOrderId
-      ? { ...baseTradeRow, alpaca_order_id: alpacaOrderId, order_status: orderStatus }
-      : baseTradeRow
-  );
-
-  if (tradeErr) {
-    if (tradeErr.message.includes("alpaca_order_id") || tradeErr.message.includes("order_status")) {
-      console.warn("[trades.insert] Retrying without order tracking cols:", tradeErr.message);
-      const { error: retryErr } = await supabase.from("trades").insert(baseTradeRow);
-      if (retryErr) throw new Error(`Trade insert failed: ${retryErr.message}`);
-    } else {
-      throw new Error(`Trade insert failed: ${tradeErr.message}`);
-    }
-  }
+  if (tradeErr) throw new Error(`rpc_insert_trade failed: ${tradeErr.message}`);
 
   // ── Update agent stats ──────────────────────────────────
   const { error: statsRpcErr } = await supabase.rpc("rpc_update_agent_stats", { p_agent_id: agent.id });
@@ -522,6 +525,58 @@ async function executeSignal(
 }
 
 // ─────────────────────────────────────────────────────────────
+/**
+ * Force-close every short position visible on Alpaca for the active key set.
+ * Buys back any qty < 0 with a market order. Runs once per agent per cron tick;
+ * idempotent — once positions are flat it does nothing.
+ */
+async function closeAllShorts(
+  supabase: ReturnType<typeof createClient>,
+  positions: Record<string, { qty: number; avg_entry_price: number }>,
+  agent: DbAgent,
+): Promise<void> {
+  for (const [symbol, p] of Object.entries(positions)) {
+    if (p.qty >= 0) continue;
+    const coverQty = Math.abs(Math.floor(p.qty));
+    if (coverQty <= 0) continue;
+    try {
+      console.log(`[closeAllShorts] ${agent.name} covering ${coverQty} ${symbol} (short qty=${p.qty})`);
+      const order = await placeOrder(symbol, coverQty, "buy");
+      const shortEntryPrice = Number(p.avg_entry_price);
+      const coverFillPrice  = Number(order.filled_avg_price ?? p.avg_entry_price);
+      const coverPnl        = (shortEntryPrice - coverFillPrice) * coverQty;
+
+      console.log(
+        `[closeAllShorts] ${agent.name} covered ${coverQty} ${symbol}: ` +
+        `entry=$${shortEntryPrice.toFixed(2)} fill=$${coverFillPrice.toFixed(2)} ` +
+        `pnl=$${coverPnl.toFixed(2)}`
+      );
+
+      const { error: insertErr } = await supabase.rpc("rpc_insert_trade", {
+        p_agent_id:        agent.id,
+        p_user_id:         agent.user_id,
+        p_symbol:          symbol,
+        p_side:            "buy",
+        p_quantity:        coverQty,
+        p_price:           coverFillPrice,
+        p_pnl:             coverPnl,
+        p_alpaca_order_id: order.id ?? null,
+        p_order_status:    order.status ?? "filled",
+      });
+      if (insertErr) {
+        console.error(`[closeAllShorts] rpc_insert_trade failed for ${symbol}:`, insertErr.message);
+      }
+
+      const { error: statsErr } = await supabase.rpc("rpc_update_agent_stats", { p_agent_id: agent.id });
+      if (statsErr) {
+        console.error(`[closeAllShorts] rpc_update_agent_stats failed for ${agent.name}:`, statsErr.message);
+      }
+    } catch (err) {
+      console.error(`[closeAllShorts] failed to cover ${symbol}:`, err);
+    }
+  }
+}
+
 async function logExecution(
   supabase: ReturnType<typeof createClient>,
   agent: DbAgent,

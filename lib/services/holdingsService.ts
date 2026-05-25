@@ -49,7 +49,8 @@ export interface AgentHolding {
 }
 
 export interface PortfolioStats {
-  totalTrades: number;
+  totalTrades: number;    // all rows (buys + sells)
+  closedTrades: number;   // sells/covers with realized P&L
   winningTrades: number;
   winRate: number;
   totalPnl: number;
@@ -93,6 +94,7 @@ export async function fetchPortfolioStats(userId: string): Promise<PortfolioStat
   const row = rows[0];
   return {
     totalTrades: Number(row.total_trades),
+    closedTrades: Number(row.closed_trades),
     winningTrades: Number(row.winning_trades),
     winRate: Number(row.win_rate),
     totalPnl: Number(row.total_pnl),
