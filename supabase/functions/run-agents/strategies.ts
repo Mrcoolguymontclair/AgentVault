@@ -2,6 +2,7 @@ import {
   getDailyBars as _getDailyBars,
   getMostActives,
   getTopLosers,
+  getTopGainers,
   getAllNews,
 } from "./alpaca.ts";
 import {
@@ -148,23 +149,28 @@ export async function managePositions(
 
   for (const symbol of Object.keys(agentPositions)) {
     const heldQty = agentPositions[symbol] ?? 0;
-    if (heldQty <= 0) continue;
+    if (heldQty === 0) continue;
+    const isShort = heldQty < 0; // negative qty = open short (can_short agents)
     const avgCost = agentAvgCost[symbol] ?? 0;
     if (avgCost <= 0) continue;
 
     const bars = await getDailyBars(symbol, 2);
     if (bars.length === 0) continue;
     const currentPrice = bars[bars.length - 1].c;
-    const pnlPct = (currentPrice - avgCost) / avgCost;
+    // Short P&L is inverted: profit when price falls below the short entry.
+    const pnlPct = isShort
+      ? (avgCost - currentPrice) / avgCost
+      : (currentPrice - avgCost) / avgCost;
 
     const openedAtStr = agentPositionOpenedAt[symbol];
     const heldMs = openedAtStr ? now - new Date(openedAtStr).getTime() : 0;
     const heldDays = heldMs / 86_400_000;
 
+    // Longs exit by selling; shorts exit by buying-to-cover.
     const baseSignal = {
       symbol,
-      side: "sell" as const,
-      notional: heldQty * currentPrice,
+      side: (isShort ? "buy" : "sell") as "buy" | "sell",
+      notional: Math.abs(heldQty) * currentPrice,
       strategyConfidence: 0.95,
       skipAiConfirmation: true,
       isExit: true,
@@ -209,13 +215,15 @@ export async function managePositions(
 
 // ─────────────────────────────────────────────────────────────
 // 1. TREND RIDER (momentum_rider)
-//    Long-only momentum continuation on the most-actives screener.
+//    Momentum continuation on the most-actives screener. can_short agents also
+//    mirror the rule to the short side (downtrend below SMA, slope-, RSI 35-60).
 //    Entry: price > 20-day SMA, positive SMA slope, volume > 20-day avg,
 //           RSI between 40-65, NOT up >4% today (avoid chasing extension).
 // ─────────────────────────────────────────────────────────────
 export async function momentumRider(
   _config: Record<string, any>,
   agentPositions: Record<string, number>,
+  canShort = false,
 ): Promise<TradeSignal | null> {
   _lastStrategyDiagnostics = "[TrendRider] fetching most-actives universe...";
 
@@ -232,7 +240,7 @@ export async function momentumRider(
   let bestStrength = 0;
 
   for (const symbol of universe) {
-    if (agentPositions[symbol] && agentPositions[symbol] > 0) {
+    if ((agentPositions[symbol] ?? 0) !== 0) {
       diagLines.push(`${symbol}:already_held`);
       continue;
     }
@@ -261,12 +269,20 @@ export async function momentumRider(
     const rsi = calculateRSI(closes, 14);
     const priceVsSma = (currentPrice - sma20) / sma20;
 
-    // Entry checks — long-only
+    // Entry checks — long side
     const aboveSma = currentPrice > sma20;
     const slopePositive = slope > 0;
     const volBeating = volRatio >= 1.0;
     const rsiInRange = rsi >= 40 && rsi <= 65;
     const notExtended = change1dPct <= 4;
+
+    // Inverse (short) entry — mirror of the long rule for can_short agents:
+    // downtrend below SMA, negative slope, volume beating, RSI 35-60 (weak,
+    // not yet deeply oversold), NOT down >4% today (avoid chasing the drop).
+    const belowSma = currentPrice < sma20;
+    const slopeNegative = slope < 0;
+    const rsiShortRange = rsi >= 35 && rsi <= 60;
+    const notExtendedDown = change1dPct >= -4;
 
     if (aboveSma && slopePositive && volBeating && rsiInRange && notExtended) {
       diagLines.push(`${symbol}:BUY rsi=${rsi.toFixed(0)} vol=${volRatio.toFixed(1)}x 1d=${change1dPct.toFixed(1)}%`);
@@ -285,6 +301,23 @@ export async function momentumRider(
           marketData: { currentPrice, sma: sma20, rsi },
         };
       }
+    } else if (canShort && belowSma && slopeNegative && volBeating && rsiShortRange && notExtendedDown) {
+      diagLines.push(`${symbol}:SHORT rsi=${rsi.toFixed(0)} vol=${volRatio.toFixed(1)}x 1d=${change1dPct.toFixed(1)}%`);
+      // Strength = combined downside momentum quality (priceVsSma is negative here)
+      const strength = (-priceVsSma) * 0.5 + Math.max(0, -slope) * 100 + (volRatio - 1) * 0.2;
+      if (strength > bestStrength) {
+        bestStrength = strength;
+        bestSignal = {
+          symbol,
+          side: "sell",
+          notional: 25, // % of budget; sell-to-open a short, 25% cap enforced
+          reason:
+            `[TrendRider] $${currentPrice.toFixed(2)} < SMA20 $${sma20.toFixed(2)} (${(priceVsSma * 100).toFixed(1)}%), ` +
+            `slope-, vol ${volRatio.toFixed(1)}x avg, RSI ${rsi.toFixed(0)} (35-60), today ${change1dPct.toFixed(1)}% — short`,
+          strategyConfidence: Math.min(1, 0.55 + (-priceVsSma) * 4 + (volRatio - 1) * 0.1),
+          marketData: { currentPrice, sma: sma20, rsi },
+        };
+      }
     } else {
       diagLines.push(`${symbol}:no aboveSma=${aboveSma} slope+=${slopePositive} vol=${volRatio.toFixed(1)}x rsi=${rsi.toFixed(0)} 1d=${change1dPct.toFixed(1)}%`);
     }
@@ -297,7 +330,8 @@ export async function momentumRider(
 
 // ─────────────────────────────────────────────────────────────
 // 2. BARGAIN HUNTER (mean_reversion)
-//    Long-only mean reversion on top-losers screener.
+//    Mean reversion: fade oversold dips (top-losers). can_short agents also
+//    fade overbought rips (top-gainers) — the mirror image.
 //    Entry: down 3-8% today (real dip, not crash), RSI < 35,
 //           50-day SMA still rising (not catching a falling knife),
 //           reject penny / biotech / meme names via quality filter + price >= $20.
@@ -305,23 +339,31 @@ export async function momentumRider(
 export async function meanReversion(
   _config: Record<string, any>,
   agentPositions: Record<string, number>,
+  canShort = false,
 ): Promise<TradeSignal | null> {
   _lastStrategyDiagnostics = "[BargainHunter] fetching top-losers universe...";
 
-  let universe = await getTopLosers(20);
-  if (universe.length === 0) {
+  let longUniverse = await getTopLosers(20);
+  if (longUniverse.length === 0) {
     console.warn("[meanReversion] screener returned empty — using fallback universe");
-    universe = REVERT_FALLBACK;
+    longUniverse = REVERT_FALLBACK;
   }
-  universe = universe.slice(0, 15);
+  // Longs fade oversold dips (top-losers). Short-enabled agents also fade
+  // overbought rips (top-gainers) — the mirror image of the dip-buy rule.
+  const candidates: Array<{ symbol: string; dir: "long" | "short" }> =
+    longUniverse.slice(0, 15).map((s) => ({ symbol: s, dir: "long" as const }));
+  if (canShort) {
+    const gainers = (await getTopGainers(20)).slice(0, 15);
+    for (const s of gainers) candidates.push({ symbol: s, dir: "short" });
+  }
 
   const rsiPeriod = 14;
-  const diagLines: string[] = [`[BargainHunter] universe=${universe.slice(0, 8).join(",")}`];
+  const diagLines: string[] = [`[BargainHunter] universe=${candidates.slice(0, 8).map((c) => c.symbol).join(",")}`];
   let bestSignal: TradeSignal | null = null;
   let bestRsiDepth = 0;
 
-  for (const symbol of universe) {
-    if (agentPositions[symbol] && agentPositions[symbol] > 0) {
+  for (const { symbol, dir } of candidates) {
+    if ((agentPositions[symbol] ?? 0) !== 0) {
       diagLines.push(`${symbol}:already_held`);
       continue;
     }
@@ -345,6 +387,34 @@ export async function meanReversion(
     const sma50 = calculateSMA(closes.slice(-50));
     const sma50Prev = calculateSMA(closes.slice(-55, -5));
     const sma50Rising = sma50 > sma50Prev;
+
+    if (dir === "short") {
+      // Inverse: real rip (up 3-8%, not a moon), RSI > 65 (overbought),
+      // 50d SMA falling (downtrend intact) — fade the bounce.
+      const validRip = change1dPct >= 3 && change1dPct <= 8;
+      const overbought = rsi > 65;
+      const sma50Falling = sma50 < sma50Prev;
+      if (validRip && overbought && sma50Falling) {
+        const rsiDepth = rsi - 65;
+        diagLines.push(`${symbol}:SHORT 1d=${change1dPct.toFixed(1)}% RSI=${rsi.toFixed(0)} sma50_falling`);
+        if (rsiDepth > bestRsiDepth) {
+          bestRsiDepth = rsiDepth;
+          bestSignal = {
+            symbol,
+            side: "sell",
+            notional: 25,
+            reason:
+              `[BargainHunter] $${currentPrice.toFixed(2)} ripped +${change1dPct.toFixed(1)}% today, RSI ${rsi.toFixed(0)} (>65), ` +
+              `50d SMA falling ($${sma50.toFixed(2)} < $${sma50Prev.toFixed(2)}) — fade the bounce (short)`,
+            strategyConfidence: Math.min(1, 0.55 + rsiDepth / 30 + 0.05),
+            marketData: { currentPrice, rsi },
+          };
+        }
+      } else {
+        diagLines.push(`${symbol}:no(short) 1d=${change1dPct.toFixed(1)}% rsi=${rsi.toFixed(0)} sma50_falling=${!sma50Rising}`);
+      }
+      continue;
+    }
 
     const validDip = change1dPct <= -3 && change1dPct >= -8;
     const oversold = rsi < 35;
@@ -377,7 +447,8 @@ export async function meanReversion(
 
 // ─────────────────────────────────────────────────────────────
 // 3. NEWS TRADER (news_trader)
-//    Long-only pure sentiment trade.
+//    Pure sentiment trade. Bullish news → long; for can_short agents,
+//    strongly bearish news → short.
 //    Entry: sentiment > 0.5, price >= $20, vol >= 500K (looser vol — news names are events).
 //    Max 2 news entries/day enforced by index.ts daily trade limit.
 //    Exits centralized in managePositions with tighter thresholds.
@@ -385,6 +456,7 @@ export async function meanReversion(
 export async function newsTrader(
   config: Record<string, any>,
   agentPositions: Record<string, number>,
+  canShort = false,
 ): Promise<TradeSignal | null> {
   _lastStrategyDiagnostics = "[NewsTrader] fetching global news stream...";
 
@@ -423,22 +495,26 @@ export async function newsTrader(
     sentimentThreshold,
   });
 
-  // Long-only: only "buy" decisions emit signals. "sell" decisions could close
-  // an existing long, but exits are handled by managePositions, so we ignore.
-  if (!decision.execute || !decision.symbol || decision.side !== "buy") {
-    _lastStrategyDiagnostics += ` | no buy signal (score=${(decision.sentiment_score ?? 0).toFixed(2)})`;
+  if (!decision.execute || !decision.symbol) {
+    _lastStrategyDiagnostics += ` | no signal (score=${(decision.sentiment_score ?? 0).toFixed(2)})`;
     console.log(`[newsTrader] ${_lastStrategyDiagnostics}`);
     return null;
   }
 
-  if (decision.sentiment_score < sentimentThreshold) {
-    _lastStrategyDiagnostics += ` | score ${decision.sentiment_score.toFixed(2)} below threshold ${sentimentThreshold}`;
+  // Bullish news → buy (long). For can_short agents, strongly bearish news →
+  // sell-to-open (short). Long-only agents ignore bearish decisions; their
+  // exits stay centralized in managePositions.
+  const wantLong  = decision.side === "buy"  && decision.sentiment_score >= sentimentThreshold;
+  const wantShort = canShort && decision.side === "sell" && decision.sentiment_score <= -sentimentThreshold;
+
+  if (!wantLong && !wantShort) {
+    _lastStrategyDiagnostics += ` | no actionable signal (side=${decision.side} score=${decision.sentiment_score.toFixed(2)} thr=${sentimentThreshold})`;
     console.log(`[newsTrader] ${_lastStrategyDiagnostics}`);
     return null;
   }
 
-  if ((agentPositions[decision.symbol] ?? 0) > 0) {
-    _lastStrategyDiagnostics += ` | already long ${decision.symbol}`;
+  if ((agentPositions[decision.symbol] ?? 0) !== 0) {
+    _lastStrategyDiagnostics += ` | already positioned in ${decision.symbol}`;
     return null;
   }
 
@@ -462,12 +538,13 @@ export async function newsTrader(
   const headlines = (headlinesBySymbol[decision.symbol] ?? []).slice(0, 3);
   const headlineText = headlines.map((h) => h.slice(0, 80)).join(" | ");
 
-  _lastStrategyDiagnostics += ` | BUY ${decision.symbol} score=${decision.sentiment_score.toFixed(2)}`;
+  const side = wantShort ? "sell" : "buy";
+  _lastStrategyDiagnostics += ` | ${side === "sell" ? "SHORT" : "BUY"} ${decision.symbol} score=${decision.sentiment_score.toFixed(2)}`;
   console.log(`[newsTrader] ${_lastStrategyDiagnostics}`);
 
   return {
     symbol: decision.symbol,
-    side: "buy",
+    side,
     notional: 20, // 20% of budget — news catalysts justify a meaningful size
     reason: `[NewsTrader] sentiment ${decision.sentiment_score.toFixed(2)} — ${decision.reasoning} | ${headlineText}`,
     strategyConfidence: decision.confidence,
@@ -801,11 +878,13 @@ export async function predictionArb(
 // ─────────────────────────────────────────────────────────────
 // 7. YOUR RULES (custom)
 //    User's plain-English strategy_prompt evaluated by Groq.
-//    Global rules apply (long-only, $20/1M, 25%, conf 0.70).
+//    Global rules apply ($20/1M, 25%, conf 0.70). can_short agents may also
+//    sell-to-open a short when the AI returns a bearish call on a flat symbol.
 // ─────────────────────────────────────────────────────────────
 export async function customStrategy(
   config: Record<string, any>,
   agentPositions: Record<string, number>,
+  canShort = false,
 ): Promise<TradeSignal | null> {
   const strategyPrompt = (config.strategy_prompt as string | undefined)?.trim().slice(0, 500);
   if (!strategyPrompt || strategyPrompt.length < 10) {
@@ -863,6 +942,7 @@ export async function customStrategy(
     strategyPrompt,
     marketData,
     currentPositions: agentPositions,
+    canShort,
   });
 
   if (!execute || !symbol || confidence < AI_CONFIDENCE_FLOOR) {
@@ -871,24 +951,38 @@ export async function customStrategy(
     return null;
   }
 
-  // Long-only: only emit buy signals on un-held names. Sells handled by exit engine.
-  if (side !== "buy") {
-    _lastStrategyDiagnostics += ` | side=${side} ignored (exits centralized)`;
+  const symbolData = marketData.find((d) => d.symbol === symbol);
+  if (!symbolData) return null;
+  // Only open on a flat symbol (long or short). Sells on held longs are left to
+  // the centralized exit engine.
+  if ((agentPositions[symbol] ?? 0) !== 0) return null;
+
+  if (side === "buy") {
+    _lastStrategyDiagnostics += ` | BUY ${symbol} conf=${confidence.toFixed(2)}`;
+    console.log(`[customStrategy] ${_lastStrategyDiagnostics}`);
+    return {
+      symbol,
+      side: "buy",
+      notional: 20,
+      reason: `[YourRules] confidence ${(confidence * 100).toFixed(0)}%: ${reasoning}`,
+      strategyConfidence: confidence,
+      marketData: { currentPrice: symbolData.currentPrice, rsi: symbolData.rsi14 },
+    };
+  }
+
+  // side === "sell": only actionable as a sell-to-open short for can_short agents.
+  if (!canShort) {
+    _lastStrategyDiagnostics += ` | side=sell ignored (long-only, exits centralized)`;
     return null;
   }
 
-  const symbolData = marketData.find((d) => d.symbol === symbol);
-  if (!symbolData) return null;
-  if ((agentPositions[symbol] ?? 0) > 0) return null;
-
-  _lastStrategyDiagnostics += ` | BUY ${symbol} conf=${confidence.toFixed(2)}`;
+  _lastStrategyDiagnostics += ` | SHORT ${symbol} conf=${confidence.toFixed(2)}`;
   console.log(`[customStrategy] ${_lastStrategyDiagnostics}`);
-
   return {
     symbol,
-    side: "buy",
+    side: "sell",
     notional: 20,
-    reason: `[YourRules] confidence ${(confidence * 100).toFixed(0)}%: ${reasoning}`,
+    reason: `[YourRules] SHORT confidence ${(confidence * 100).toFixed(0)}%: ${reasoning}`,
     strategyConfidence: confidence,
     marketData: { currentPrice: symbolData.currentPrice, rsi: symbolData.rsi14 },
   };
@@ -925,7 +1019,9 @@ async function strategyLab(
 
 // ─────────────────────────────────────────────────────────────
 // Router — dispatches to the correct strategy function.
-// All strategies share the same long-only signature now.
+// canShort (agents.can_short, rule 8) is forwarded to the strategies that
+// support sell-to-open shorts: momentum_rider, mean_reversion, news_trader,
+// custom. The rest stay long-only regardless.
 // ─────────────────────────────────────────────────────────────
 export async function runStrategy(
   strategyId: string,
@@ -934,20 +1030,21 @@ export async function runStrategy(
   agentAvgCost: Record<string, number> = {},
   agentPositionOpenedAt: Record<string, string> = {},
   agentLastBuyAt: Record<string, string> = {},
+  canShort = false,
 ): Promise<TradeSignal | null> {
   switch (strategyId) {
     case "momentum_rider":
-      return momentumRider(config, agentPositions);
+      return momentumRider(config, agentPositions, canShort);
     case "mean_reversion":
-      return meanReversion(config, agentPositions);
+      return meanReversion(config, agentPositions, canShort);
     case "prediction_arb":
       return predictionArb(config, agentPositions);
     case "dca_plus":
       return dcaPlus(config, agentPositions, agentAvgCost, agentPositionOpenedAt, agentLastBuyAt);
     case "custom":
-      return customStrategy(config, agentPositions);
+      return customStrategy(config, agentPositions, canShort);
     case "news_trader":
-      return newsTrader(config, agentPositions);
+      return newsTrader(config, agentPositions, canShort);
     case "blind_quant":
       return blindQuant(config, agentPositions);
     case "strategy_lab":

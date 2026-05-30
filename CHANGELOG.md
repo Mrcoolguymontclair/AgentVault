@@ -4,6 +4,27 @@ All notable changes to this project are documented here. Newest entries at the t
 
 ---
 
+## [2026-05-30] — feat(agents): opt-in per-agent short selling (`can_short`, rule 8)
+
+Short selling is now opt-in per agent, default OFF (long-only). Long-only agents (`can_short=false`) behave exactly as before. Shipped as two logical commits.
+
+**Commit A — flag + wiring + UI + execution gating**
+- Migration `026_agent_can_short.sql`: `agents.can_short boolean NOT NULL DEFAULT false`; recreates `rpc_create_agent` with a 10th `p_can_short` param (drops the old 9-arg signature first to avoid an ambiguous overload). **Run 026 in the Supabase SQL editor.**
+- Client: `CreateAgentInput.can_short` + `rpc_create_agent` call (`agentService.ts`); HireSheet Configure step gains an "Allow short selling" toggle (default OFF, helper "Agents usually lose money shorting. Off = long-only.") threaded through `handleHire`.
+- Edge `index.ts`: `closeAllShorts` now runs only for `can_short=false` agents (short-enabled agents keep their shorts); trade-reconstruction sell path allows sell-to-open (net qty goes negative, tracking short entry avg); `executeSignal` reworked to classify long-buy / short-open / long-close / buy-to-cover — entry gates (rules 9/10: $20 floor, 25% cap, max-3 positions) now apply to short opens via absolute exposure; cover P&L = (shortEntry − fill)×qty.
+- Edge `groq.ts`: `interpretCustomStrategy` system prompt branches on `canShort` (long-only prompt by default).
+- `holdingsService.ts` already renders shorts (negative qty / inverted P&L) — verified, no change.
+
+**Commit B — strategy-level short signals**
+- `managePositions` exit engine is now sign-aware: shorts get stop-loss / take-profit / time-stop, exiting via buy-to-cover.
+- `canShort` threaded through `runStrategy` into the strategies. Short (sell-to-open) entries added as mirrors of the long rules for: **Trend Rider** (downtrend below SMA, slope-, RSI 35-60), **Bargain Hunter** (fades overbought rips on a new top-gainers screener — `getTopGainers` added to `alpaca.ts`), **News Trader** (strongly bearish sentiment), and **Your Rules / custom** (AI bearish call on a flat symbol). `blind_quant`, `dca_plus`, `prediction_arb`, `strategy_lab` remain long-only by design.
+- Long-only comments updated across the changed strategies.
+- `npx tsc --noEmit`: 0 new errors (edge Deno errors are pre-existing/expected).
+- **Deploy:** `supabase functions deploy run-agents --no-verify-jwt`
+- ⚠️ Not yet runtime-verified — needs a test `can_short` agent to confirm a full short → cover round-trip (open, exit-engine cover, P&L, holdings display).
+
+---
+
 ## [2026-05-30] — refactor(copy): rename agent-creation "Deploy" → "Hire" (CLAUDE.md rule 11)
 
 Full-consistency rename of the launch-an-agent sense of "Deploy" to "Hire" — UI copy, legal text, and code identifiers. Capital-sense ("deployed capital", "Budget Deployed") and edge-function-sense (`supabase functions deploy`, debug "run-agents (deployed)") left untouched.

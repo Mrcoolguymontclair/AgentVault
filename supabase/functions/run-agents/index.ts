@@ -113,13 +113,16 @@ Deno.serve(async (req) => {
 
       let alpacaPositions = await getPositions();
 
-      // ── One-time short-position cleanup ─────────────────────
-      // Short selling is permanently disabled. Any negative-qty position left
-      // over from the pre-overhaul code is force-closed here before the agent
-      // runs its normal cycle. This runs every tick — once positions are flat
-      // it becomes a no-op.
-      await closeAllShorts(supabase, alpacaPositions, agent);
-      alpacaPositions = await getPositions();
+      // ── Short-position cleanup (long-only agents only) ──────
+      // Short selling is OPT-IN per agent (rule 8). For long-only agents
+      // (can_short=false) any negative-qty position — left over from the
+      // pre-overhaul shorts era — is force-closed before the agent runs its
+      // normal cycle (a no-op once flat). Agents with can_short=true keep
+      // their shorts.
+      if (!agent.can_short) {
+        await closeAllShorts(supabase, alpacaPositions, agent);
+        alpacaPositions = await getPositions();
+      }
 
       try {
         const { data: customKeyData } = await supabase.rpc("rpc_get_key_for_agent", {
@@ -205,8 +208,36 @@ async function runAgent(
           agentPositionOpenedAt[sym] = t.executed_at;
         }
         agentLastBuyAt[sym] = t.executed_at;
+      } else if (agent.can_short) {
+        // Sell with shorting enabled: close longs first, then sell-to-open.
+        // Once long qty is exhausted the net position goes negative (a short),
+        // tracking the short's weighted-avg entry price for later cover P&L.
+        if (prevQty <= 0) {
+          // Adding to / opening a short.
+          const prevShortQty = -prevQty;
+          const prevAvg = agentAvgCost[sym] ?? 0;
+          const newShortQty = prevShortQty + tradeQty;
+          agentAvgCost[sym] = prevShortQty > 0
+            ? (prevAvg * prevShortQty + Number(t.price) * tradeQty) / newShortQty
+            : Number(t.price);
+          agentPositions[sym] = -newShortQty;
+          if (prevQty === 0 && !agentPositionOpenedAt[sym]) {
+            agentPositionOpenedAt[sym] = t.executed_at;
+          }
+        } else if (tradeQty > prevQty) {
+          // Sell crosses from long, through flat, into a short.
+          agentPositions[sym] = -(tradeQty - prevQty);
+          agentAvgCost[sym] = Number(t.price);
+          agentPositionOpenedAt[sym] = t.executed_at;
+        } else {
+          // Partial / full long close.
+          agentPositions[sym] = prevQty - tradeQty;
+          if (agentPositions[sym] === 0) {
+            delete agentPositionOpenedAt[sym];
+          }
+        }
       } else {
-        // Sell — long-close only (shorts disabled).
+        // Sell — long-close only (long-only agent).
         agentPositions[sym] = Math.max(0, prevQty - tradeQty);
         if (agentPositions[sym] === 0) {
           delete agentPositionOpenedAt[sym];
@@ -259,6 +290,7 @@ async function runAgent(
       agentAvgCost,
       agentPositionOpenedAt,
       agentLastBuyAt,
+      agent.can_short === true,
     );
     if (!signal) {
       await logExecution(supabase, agent, {
@@ -295,14 +327,29 @@ async function executeSignal(
   const base: ExecutionResult = { agentId: agent.id, agentName: agent.name, success: false };
 
   const isExit = signal.isExit === true;
-  const isLongBuy = signal.side === "buy";
+  const canShort = agent.can_short === true;
+  const currentHeldQty = agentPositions[signal.symbol] ?? 0;
+  // Trade classification (rule 8: shorting is opt-in per agent):
+  //   isCover     — buy that reduces an existing short (currentHeldQty < 0)
+  //   isShortOpen — sell on a flat/short symbol → sell-to-open a short
+  //   isLongBuy   — buy that opens/adds a long
+  //   isLongClose — sell that closes a long
+  const isCover = canShort && signal.side === "buy" && currentHeldQty < 0;
+  const isShortOpen = canShort && signal.side === "sell" && !isExit && currentHeldQty <= 0;
+  const isLongBuy = signal.side === "buy" && !isCover;
+  const isLongClose = signal.side === "sell" && !isShortOpen;
+  const isEntry = (isLongBuy || isShortOpen) && !isExit; // new position → entry gates apply
 
   // ── Resolve notional → dollar amount ─────────────────────
-  // Long buy:  notional = % of budget
-  // Sell:      notional = $ value to close
+  // Entries (long buy / short open): notional = % of budget.
+  // Closes  (long close / cover):    notional = $ value to close.
   let dollarAmount: number;
   if (isLongBuy) {
     dollarAmount = Math.min(budget * (signal.notional / 100), availableBudget);
+  } else if (isShortOpen) {
+    // Short proceeds aren't cash, so don't cap by availableBudget — the
+    // concentration cap below bounds short exposure to MAX_POSITION_PCT.
+    dollarAmount = budget * (signal.notional / 100);
   } else {
     dollarAmount = signal.notional;
   }
@@ -312,14 +359,14 @@ async function executeSignal(
     return { ...base, skipped: true, skipReason: "Trade size too small" };
   }
 
-  // ── Entry gates (skipped for exits) ──────────────────────
-  if (isLongBuy && !isExit) {
-    if (availableBudget < 1) {
+  // ── Entry gates (apply to new longs AND new shorts; skipped for exits) ──
+  if (isEntry) {
+    if (isLongBuy && availableBudget < 1) {
       await logExecution(supabase, agent, { action: "skipped", skip_reason: "Budget fully deployed" });
       return { ...base, skipped: true, skipReason: "Budget fully deployed" };
     }
 
-    // Hard price floor
+    // Hard price floor (rule 9) — same $20 floor for longs and shorts
     if (signal.marketData.currentPrice < MIN_PRICE) {
       const skipReason = `[FILTER] ${signal.symbol} rejected: price $${signal.marketData.currentPrice.toFixed(2)} < $${MIN_PRICE} minimum`;
       console.log(skipReason);
@@ -327,8 +374,8 @@ async function executeSignal(
       return { ...base, skipped: true, skipReason };
     }
 
-    // 25% concentration cap
-    const currentPositionValue = (agentPositions[signal.symbol] ?? 0) * (signal.marketData.currentPrice);
+    // 25% concentration cap (absolute exposure — covers shorts too)
+    const currentPositionValue = Math.abs(agentPositions[signal.symbol] ?? 0) * (signal.marketData.currentPrice);
     const projectedValue = currentPositionValue + dollarAmount;
     if (projectedValue > budget * MAX_POSITION_PCT) {
       // Reduce dollarAmount to fit within the cap
@@ -341,9 +388,9 @@ async function executeSignal(
       dollarAmount = allowed;
     }
 
-    // Max open positions (counts existing longs)
-    const openPositions = Object.entries(agentPositions).filter(([, q]) => q > 0.00001);
-    const alreadyHeld = (agentPositions[signal.symbol] ?? 0) > 0;
+    // Max open positions (rule 10) — counts any non-flat position (long or short)
+    const openPositions = Object.entries(agentPositions).filter(([, q]) => Math.abs(q) > 0.00001);
+    const alreadyHeld = Math.abs(agentPositions[signal.symbol] ?? 0) > 0;
     if (!alreadyHeld && openPositions.length >= MAX_OPEN_POSITIONS) {
       const skipReason = `Max positions reached (${openPositions.length}/${MAX_OPEN_POSITIONS}) — skipping new ${signal.symbol}`;
       await logExecution(supabase, agent, { action: "skipped", skip_reason: skipReason, signal_detected: true, signal_symbol: signal.symbol, signal_side: signal.side });
@@ -353,9 +400,9 @@ async function executeSignal(
 
   // ── AI confirmation (skipped for exits and strategies that pre-decided) ─
   let ai: { execute: boolean; reasoning: string; confidence: number };
-  if (isExit || signal.skipAiConfirmation) {
+  if (isExit || isCover || signal.skipAiConfirmation) {
     ai = {
-      execute: signal.strategyConfidence >= AI_CONFIDENCE_FLOOR || isExit,
+      execute: signal.strategyConfidence >= AI_CONFIDENCE_FLOOR || isExit || isCover,
       reasoning: signal.reason,
       confidence: signal.strategyConfidence,
     };
@@ -369,7 +416,7 @@ async function executeSignal(
     });
   }
 
-  if (!isExit && (!ai.execute || ai.confidence < AI_CONFIDENCE_FLOOR)) {
+  if (!isExit && !isCover && (!ai.execute || ai.confidence < AI_CONFIDENCE_FLOOR)) {
     const skipReason = `AI rejected (confidence ${(ai.confidence * 100).toFixed(0)}%): ${ai.reasoning}`;
     await logExecution(supabase, agent, {
       action: "skipped",
@@ -389,10 +436,14 @@ async function executeSignal(
   const currentHeld = agentPositions[signal.symbol] ?? 0;
 
   let qty: number;
-  if (signal.side === "sell") {
-    qty = Math.min(Math.floor(rawQty), Math.floor(Math.max(0, currentHeld)));
+  if (isShortOpen) {
+    qty = Math.floor(rawQty); // new short — size against budget, no held to clamp to
+  } else if (signal.side === "sell") {
+    qty = Math.min(Math.floor(rawQty), Math.floor(Math.max(0, currentHeld))); // long close
+  } else if (isCover) {
+    qty = Math.min(Math.floor(rawQty), Math.floor(Math.abs(Math.min(0, currentHeld)))); // cover ≤ short qty
   } else {
-    qty = Math.floor(rawQty);
+    qty = Math.floor(rawQty); // long buy
   }
 
   if (qty <= 0) {
@@ -415,8 +466,22 @@ async function executeSignal(
   }
 
   // ── P&L ─────────────────────────────────────────────────
+  // Entries (long buy / short open) realize $0. Long closes and short covers
+  // realize P&L against their respective entry price.
   let tradePnl = 0;
-  if (signal.side === "sell") {
+  if (isCover) {
+    // Buy-to-cover: profit when cover price < short entry. Short entry avg comes
+    // from the trade-reconstruction map (rpc_get_agent_avg_cost is long-only).
+    const shortEntry = agentAvgCost[signal.symbol] ?? 0;
+    const alpacaAvgPrice = Number(alpacaPositions[signal.symbol]?.avg_entry_price ?? 0);
+    const entry = shortEntry > 0 ? shortEntry : alpacaAvgPrice;
+    if (entry > 0) {
+      tradePnl = (entry - fillPrice) * qty;
+      console.log(`[pnl] COVER ${signal.symbol}: ($${entry.toFixed(2)} - $${fillPrice.toFixed(2)}) × ${qty} = $${tradePnl.toFixed(2)}`);
+    } else {
+      console.warn(`[pnl] COVER ${signal.symbol} (agent: ${agent.name}): short entry unresolvable — recording pnl=0.`);
+    }
+  } else if (isLongClose) {
     const { data: sqlAvgCost } = await supabase.rpc("rpc_get_agent_avg_cost", {
       p_agent_id: agent.id,
       p_symbol: signal.symbol,

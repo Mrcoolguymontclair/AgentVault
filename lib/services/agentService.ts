@@ -46,6 +46,7 @@ export interface CreateAgentInput {
   budget: number;
   is_private: boolean;
   model_id: ModelId;
+  can_short: boolean;
 }
 
 export async function fetchUserAgents(userId: string) {
@@ -66,6 +67,7 @@ export async function createAgent(userId: string, input: CreateAgentInput) {
     p_budget: input.budget,
     p_is_private: input.is_private,
     p_model_id: input.model_id,
+    p_can_short: input.can_short,
   });
 
   if (error) {

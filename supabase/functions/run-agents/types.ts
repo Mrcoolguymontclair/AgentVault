@@ -13,6 +13,7 @@ export interface DbAgent {
   trades_count: number;
   win_rate: number;
   max_drawdown: number;
+  can_short?: boolean;
 }
 
 export interface AgentLogInsert {

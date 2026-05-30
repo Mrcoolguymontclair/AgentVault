@@ -64,6 +64,7 @@ export function HireSheet({ visible, onClose, onHired }: Props) {
   const [timeHorizon, setTimeHorizon] = useState<TimeHorizonId>("medium");
   const [isPrivate, setIsPrivate] = useState(false);
   const [aggressive, setAggressive] = useState(false);
+  const [canShort, setCanShort] = useState(false);
   const [isHiring, setIsHiring] = useState(false);
   const [hireError, setHireError] = useState<string | null>(null);
 
@@ -82,6 +83,7 @@ export function HireSheet({ visible, onClose, onHired }: Props) {
     setTimeHorizon("medium");
     setIsPrivate(false);
     setAggressive(false);
+    setCanShort(false);
     setIsHiring(false);
     setHireError(null);
     onClose();
@@ -170,6 +172,7 @@ export function HireSheet({ visible, onClose, onHired }: Props) {
         budget,
         is_private: isPrivate,
         model_id: selectedModel,
+        can_short: canShort,
       });
 
       setIsHiring(false);
@@ -334,6 +337,8 @@ export function HireSheet({ visible, onClose, onHired }: Props) {
                   setIsPrivate={setIsPrivate}
                   aggressive={aggressive}
                   setAggressive={setAggressive}
+                  canShort={canShort}
+                  setCanShort={setCanShort}
                   onNext={() => setStep(3)}
                 />
               )}
@@ -470,6 +475,8 @@ function StepConfigure({
   setIsPrivate,
   aggressive,
   setAggressive,
+  canShort,
+  setCanShort,
   onNext,
 }: {
   colors: any;
@@ -491,6 +498,8 @@ function StepConfigure({
   setIsPrivate: (v: boolean) => void;
   aggressive: boolean;
   setAggressive: (v: boolean) => void;
+  canShort: boolean;
+  setCanShort: (v: boolean) => void;
   onNext: () => void;
 }) {
   const canGoLive = plan !== "free";
@@ -977,6 +986,46 @@ function StepConfigure({
           }}
         >
           {aggressive && <Ionicons name="checkmark" size={14} color="#fff" />}
+        </View>
+      </Pressable>
+
+      {/* Allow Short Selling Toggle */}
+      <Pressable
+        onPress={() => setCanShort(!canShort)}
+        style={{
+          flexDirection: "row",
+          alignItems: "center",
+          gap: 14,
+          padding: 14,
+          backgroundColor: colors.cardSecondary,
+          borderRadius: 14,
+          borderWidth: 1,
+          borderColor: canShort ? Colors.danger : colors.cardBorder,
+        }}
+      >
+        <Ionicons
+          name="trending-down"
+          size={20}
+          color={canShort ? Colors.danger : colors.textSecondary}
+        />
+        <View style={{ flex: 1 }}>
+          <Text style={{ color: colors.text, fontWeight: "600", fontSize: 14 }}>
+            Allow short selling
+          </Text>
+          <Text style={{ color: colors.textSecondary, fontSize: 12, marginTop: 2 }}>
+            Agents usually lose money shorting. Off = long-only.
+          </Text>
+        </View>
+        <View
+          style={{
+            width: 24, height: 24, borderRadius: 8,
+            backgroundColor: canShort ? Colors.danger : colors.card,
+            borderWidth: 1.5,
+            borderColor: canShort ? Colors.danger : colors.cardBorder,
+            alignItems: "center", justifyContent: "center",
+          }}
+        >
+          {canShort && <Ionicons name="checkmark" size={14} color="#fff" />}
         </View>
       </Pressable>
 

@@ -194,6 +194,23 @@ export async function getTopLosers(top = 20): Promise<string[]> {
 }
 
 /**
+ * Top N biggest gaining symbols today (by percent change).
+ * Same /stocks/movers endpoint as getTopLosers — reads the `gainers` array.
+ * Used by short-enabled mean-reversion to fade overbought rips.
+ */
+export async function getTopGainers(top = 20): Promise<string[]> {
+  try {
+    const data = await alpacaFetch(`${SCREENER}/stocks/movers?top=${top}`);
+    return ((data.gainers ?? []) as any[])
+      .map((s: any) => String(s.symbol ?? "").toUpperCase())
+      .filter(Boolean);
+  } catch (err) {
+    console.error("[getTopGainers] ERROR:", (err as Error).message);
+    return [];
+  }
+}
+
+/**
  * Global news stream — no symbol filter, returns all recent articles.
  * Uses v1beta1/news (the correct endpoint for unfiltered global news).
  * Used by NewsTrader to scan the entire market for sentiment catalysts.

@@ -155,6 +155,7 @@ export async function interpretCustomStrategy(opts: {
     momentum5d:   number;
   }>;
   currentPositions: Record<string, number>;
+  canShort?: boolean;
 }): Promise<{ execute: boolean; symbol: string; side: "buy" | "sell"; reasoning: string; confidence: number }> {
   if (isConservativeMode()) {
     return { execute: false, symbol: "", side: "buy", reasoning: "Conservative mode: custom strategy skipped", confidence: 0 };
@@ -175,10 +176,15 @@ export async function interpretCustomStrategy(opts: {
 
   const validSymbols = opts.marketData.map((d) => d.symbol).join(", ");
 
-  const systemPrompt =
-    "You are an AI trading agent. Follow the user's strategy instructions exactly. " +
-    "You can buy (go long) or sell (go short / close a long). " +
-    "Output ONLY a raw JSON object — no markdown, no code fences, no explanation.";
+  // Short-capable agents may go long or short; long-only agents may only buy
+  // or close an existing long (rule 8: shorting is opt-in per agent).
+  const systemPrompt = opts.canShort
+    ? "You are an AI trading agent. Follow the user's strategy instructions exactly. " +
+      "You can buy (go long) or sell (go short / close a long). " +
+      "Output ONLY a raw JSON object — no markdown, no code fences, no explanation."
+    : "You are a LONG-ONLY AI trading agent. Follow the user's strategy instructions exactly. " +
+      "You can only buy (go long) or sell to close an existing long — NEVER open a short. " +
+      "Output ONLY a raw JSON object — no markdown, no code fences, no explanation.";
 
   const userPrompt =
     `Strategy instructions: "${opts.strategyPrompt}"\n` +
