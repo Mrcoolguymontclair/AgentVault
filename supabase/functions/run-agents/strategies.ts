@@ -72,7 +72,7 @@ export const MIN_PRICE = 20;
 export const MIN_AVG_VOLUME = 1_000_000;
 export const MAX_OPEN_POSITIONS = 3;
 export const MAX_POSITION_PCT = 0.25; // 25% of budget per position
-export const AI_CONFIDENCE_FLOOR = 0.70;
+export const AI_CONFIDENCE_FLOOR = 0.60;
 
 // ─────────────────────────────────────────────────────────────
 // Helpers
@@ -218,7 +218,7 @@ export async function managePositions(
 //    Momentum continuation on the most-actives screener. can_short agents also
 //    mirror the rule to the short side (downtrend below SMA, slope-, RSI 35-60).
 //    Entry: price > 20-day SMA, positive SMA slope, volume > 20-day avg,
-//           RSI between 40-65, NOT up >4% today (avoid chasing extension).
+//           RSI between 35-70, NOT up >4% today (avoid chasing extension).
 // ─────────────────────────────────────────────────────────────
 export async function momentumRider(
   _config: Record<string, any>,
@@ -273,7 +273,7 @@ export async function momentumRider(
     const aboveSma = currentPrice > sma20;
     const slopePositive = slope > 0;
     const volBeating = volRatio >= 1.0;
-    const rsiInRange = rsi >= 40 && rsi <= 65;
+    const rsiInRange = rsi >= 35 && rsi <= 70;
     const notExtended = change1dPct <= 4;
 
     // Inverse (short) entry — mirror of the long rule for can_short agents:
@@ -296,7 +296,7 @@ export async function momentumRider(
           notional: 25, // % of budget; index.ts enforces 25% cap
           reason:
             `[TrendRider] $${currentPrice.toFixed(2)} > SMA20 $${sma20.toFixed(2)} (+${(priceVsSma * 100).toFixed(1)}%), ` +
-            `slope+, vol ${volRatio.toFixed(1)}x avg, RSI ${rsi.toFixed(0)} (40-65), today ${change1dPct.toFixed(1)}%`,
+            `slope+, vol ${volRatio.toFixed(1)}x avg, RSI ${rsi.toFixed(0)} (35-70), today ${change1dPct.toFixed(1)}%`,
           strategyConfidence: Math.min(1, 0.55 + priceVsSma * 4 + (volRatio - 1) * 0.1),
           marketData: { currentPrice, sma: sma20, rsi },
         };

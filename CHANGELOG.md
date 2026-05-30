@@ -4,6 +4,17 @@ All notable changes to this project are documented here. Newest entries at the t
 
 ---
 
+## [2026-05-30] — fix(run-agents): BUG-003 — widen the trade funnel
+
+Four tweaks to raise execution rate without dropping quality floors (rules 9/10 intact):
+- **A** `index.ts:28`: `DAILY_ENTRY_LIMIT` 2 → 5 (room for more entries per market day).
+- **B** `strategies.ts:75`: `AI_CONFIDENCE_FLOOR` 0.70 → 0.60 (fewer borderline AI rejections).
+- **C** `index.ts` `executeSignal` qty block: after the long-buy/short-open/long-close/cover chain, round borderline **entries** up — `if (qty === 0 && rawQty >= 0.5 && (isLongBuy || isShortOpen)) qty = 1;`. The `if (qty <= 0)` skip below now only fires when `rawQty < 0.5`. Closes/covers stay clamped to held/short qty (not rounded up).
+- **D** `strategies.ts` Trend Rider (momentum_rider) **long** entry RSI band 40-65 → **35-70** (condition, header comment, and the "(40-65)" reason string). The SHORT band (`rsiShortRange` 35-60) is unchanged.
+- `npx tsc --noEmit`: 0 new errors. **Deploy:** `supabase functions deploy run-agents --no-verify-jwt`
+
+---
+
 ## [2026-05-30] — fix(run-agents): BUG-007 — long-close sells bypass AI confirmation
 
 - `index.ts:329`: `isExit` now also true when `signal.side === "sell" && (agentPositions[symbol] ?? 0) > 0`. Strategy-emitted sells that close a held long were being routed through Groq `confirmTrade` and frequently rejected ("stop-loss triggered, signal not valid"), blocking profitable exits. Treating a held-long sell as an exit bypasses AI confirmation.

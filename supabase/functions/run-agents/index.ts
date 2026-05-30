@@ -25,7 +25,7 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SUPABASE_SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 
 // Daily limits — entries only. Exits always go through.
-const DAILY_ENTRY_LIMIT = 2;
+const DAILY_ENTRY_LIMIT = 5;
 const DAILY_LOSS_LIMIT_PCT = 0.03;
 
 Deno.serve(async (req) => {
@@ -448,6 +448,10 @@ async function executeSignal(
   } else {
     qty = Math.floor(rawQty); // long buy
   }
+
+  // BUG-003: round borderline ENTRIES up to 1 share so legit single-share
+  // trades aren't floored to 0. Closes/covers stay clamped to held/short qty.
+  if (qty === 0 && rawQty >= 0.5 && (isLongBuy || isShortOpen)) qty = 1;
 
   if (qty <= 0) {
     await logExecution(supabase, agent, { action: "skipped", skip_reason: "Qty rounds to 0", signal_detected: true, signal_symbol: signal.symbol, signal_side: signal.side });
