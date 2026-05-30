@@ -147,6 +147,12 @@ export default function DebugScreen() {
           : result.error ?? "Unknown error"
       );
       await loadLogs();
+      // BUG-004: refresh dashboard stores so Today's P&L updates without a
+      // manual reload after a force run.
+      if (authUser?.id) {
+        await useAgentStore.getState().loadRecentTrades(authUser.id);
+        await useAgentStore.getState().loadAgents(authUser.id);
+      }
     } catch (err: any) {
       Alert.alert("Error", err?.message ?? "Failed to invoke edge function");
     } finally {

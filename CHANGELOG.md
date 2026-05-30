@@ -4,6 +4,14 @@ All notable changes to this project are documented here. Newest entries at the t
 
 ---
 
+## [2026-05-30] — fix(ui): BUG-004 force-run P&L refresh + BUG-008 chart skeleton (no edge deploy)
+
+- **BUG-004** `app/(tabs)/debug.tsx`: after a successful Force Run, refresh the agent stores (`loadRecentTrades` + `loadAgents`, guarded on `authUser?.id`) so Today's P&L updates without a manual reload.
+- **BUG-008** `components/ui/PortfolioChart.tsx`: the `loading` branch now renders the shimmer `Skeleton` (from `LoadingSkeleton.tsx`) instead of a static gray block; "No chart data yet" shows only when `loading === false` AND data is empty (loading is handled first, so the empty text no longer flashes before data arrives).
+- `npx tsc --noEmit`: 0 errors. Frontend-only — no edge-function deploy needed.
+
+---
+
 ## [2026-05-30] — fix(run-agents): BUG-003 — widen the trade funnel
 
 Four tweaks to raise execution rate without dropping quality floors (rules 9/10 intact):

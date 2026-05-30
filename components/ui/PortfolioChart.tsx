@@ -13,6 +13,7 @@ import Svg, {
 } from "react-native-svg";
 import type { ChartPoint } from "@/lib/services/portfolioService";
 import { Colors } from "@/constants/colors";
+import { Skeleton } from "@/components/ui/LoadingSkeleton";
 
 const CHART_HEIGHT = 140;
 const PADDING = { top: 8, bottom: 28, left: 0, right: 4 };
@@ -153,37 +154,23 @@ export function PortfolioChart({ data, width, isPositive, isDark, loading, spyDa
   const drawWidth = Math.max(width - PADDING.left - PADDING.right, 1);
   const drawHeight = CHART_HEIGHT - PADDING.top - PADDING.bottom;
 
-  // Loading skeleton
+  // Loading skeleton — shimmer (BUG-008: shown while loading so the empty-state
+  // text never flashes before data arrives).
   if (loading) {
     return (
-      <View style={{ height: CHART_HEIGHT }}>
-        <View
-          style={{
-            margin: 12,
-            height: drawHeight,
-            borderRadius: 8,
-            backgroundColor: isDark ? Colors.dark.skeletonHighlight : Colors.light.skeletonHighlight,
-            opacity: 0.6,
-          }}
-        />
-        <View style={{ flexDirection: "row", justifyContent: "space-between", paddingHorizontal: 12 }}>
+      <View style={{ height: CHART_HEIGHT, paddingHorizontal: 12, paddingTop: 12 }}>
+        <Skeleton height={drawHeight} borderRadius={8} />
+        <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 8 }}>
           {[60, 40, 60].map((w, i) => (
-            <View
-              key={i}
-              style={{
-                height: 10,
-                width: w,
-                borderRadius: 4,
-                backgroundColor: isDark ? Colors.dark.skeleton : Colors.light.skeleton,
-              }}
-            />
+            <Skeleton key={i} width={w} height={10} borderRadius={4} />
           ))}
         </View>
       </View>
     );
   }
 
-  // Empty / no data
+  // Empty / no data — only the legitimate empty state (loading already handled
+  // above, so this renders only when loading === false AND data is empty).
   if (data.length < 2) {
     return (
       <View style={{ height: CHART_HEIGHT, alignItems: "center", justifyContent: "center" }}>
