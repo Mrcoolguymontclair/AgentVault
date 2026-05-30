@@ -4,6 +4,36 @@ All notable changes to this project are documented here. Newest entries at the t
 
 ---
 
+## [2026-05-30] — refactor(copy): rename agent-creation "Deploy" → "Hire" (CLAUDE.md rule 11)
+
+Full-consistency rename of the launch-an-agent sense of "Deploy" to "Hire" — UI copy, legal text, and code identifiers. Capital-sense ("deployed capital", "Budget Deployed") and edge-function-sense (`supabase functions deploy`, debug "run-agents (deployed)") left untouched.
+
+- **Component rename**: `components/agents/DeploySheet.tsx` → `HireSheet.tsx` (via `git mv`). Export `DeploySheet`→`HireSheet`. Identifiers: `handleDeploy`→`handleHire`, `isDeploying`→`isHiring`, `deployError`→`hireError`, `onDeployed`→`onHired`, `onDeploy`→`onHire`. STEP_LABELS last step, "Deploy Agent" (×2), "Review & Deploy", and the plan-limit/console/comment copy all → Hire wording.
+- **agents.tsx**: import + `<HireSheet>` usage, `showDeploy/setShowDeploy`→`showHire/setShowHire`, header "Deploy" button + empty-state "Deploy First Agent"/"haven't deployed" copy.
+- **UI strings**: `onboarding.tsx`, `auth/signup.tsx`, `(tabs)/index.tsx` (empty-state + "Deploy Agent" button), `(tabs)/leaderboard.tsx`, `(tabs)/social.tsx`, `notificationStore.ts` ("🚀 Agent Hired!").
+- **Legal**: `legal/terms.tsx` + `legal/privacy.tsx` — "deploy AI agents"/"agent deployment" → "hire AI agents"/"agent hiring".
+- Verified: `grep -rniE "deploy" app components store` leaves only capital/edge-function senses. `npx tsc --noEmit` → 0 app-code errors (only expected Deno errors in `supabase/functions/`).
+
+---
+
+## [2026-05-30] — fix(data): migration 025 seals orphan short positions (BUG-002)
+
+- `supabase/migrations/025_seal_orphan_shorts.sql`: pairs every (agent_id, symbol) with negative lifetime net quantity (leftover pre-overhaul shorts never covered in the trades table) with a single synthetic `buy` of `ABS(net)` shares at the last sell price, `pnl=0`, `order_status='synthetic-seal'`, executed 1s after the last sell. Set-based net approach (not a chronological walk) so interleaved buy/sell symbols like CCL/USO/LCID aren't over-sealed.
+- Then refreshes `rpc_update_agent_stats` for each affected agent.
+- Dry-run (rolled back) against live DB on 2026-05-30: inserts **42** synthetic rows across **2** agents, drops negative-net positions from 42 → **0**, leaving **3** real long positions. (Recon's 31/7 estimate was stale — 5 days of trading since.) Reversal: `DELETE FROM trades WHERE order_status='synthetic-seal';`
+- Status: APPLIED to production 2026-05-30 via `apply_migration`. Post-state verified: 42 seals inserted, 0 negative-net positions remaining, 3 real longs, total trades 132 → 174.
+
+---
+
+## [2026-05-30] — chore(data): full portfolio reset to fresh start + archive
+
+- Archived all account data before wiping: project files in `archive/reset_2026-05-30/` (`agents.json` ×5, `trades.json`/`trades.csv` ×174, `portfolio_snapshots.json` ×69) plus a lossless server-side copy of every table (incl. 6,989 `agent_logs` + 4,316 `groq_usage`) in Supabase schema `archive_reset_20260530`.
+- Wiped from live app (user `eb2e36a9…eec2`): agents (cascades trades, agent_logs, strategy_generations, agent_follows), portfolio_snapshots, groq_usage, comments, follows, notifications. All → 0.
+- Preserved: profiles (account), user_api_keys, subscriptions, notification_preferences.
+- Reversal if ever needed: restore from `archive_reset_20260530.*` tables.
+
+---
+
 ## [2026-05-25] — Fix rpc().catch TypeError killing agent runs
 
 - `index.ts:496`: replaced `.rpc(...).catch(...)` (invalid — Supabase RPC builder has no `.catch`) with `await`+ try/catch. The uncaught `TypeError: supabase.rpc(...).catch is not a function` was aborting every successful trade run before `logExecution(action="traded")` could fire, causing every trade to be logged as an error in `agent_logs`.

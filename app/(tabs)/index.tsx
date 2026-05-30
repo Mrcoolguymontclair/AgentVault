@@ -1825,8 +1825,8 @@ function EmptyAgentsCard({ tradingMode, colors, isDark }: {
         </Text>
         <Text style={{ color: colors.textSecondary, fontSize: 14, textAlign: "center", lineHeight: 20, maxWidth: 260 }}>
           {tradingMode === "live"
-            ? "Switch an agent to live mode or deploy a new one to start trading real money."
-            : "Deploy your first AI trading agent in minutes. No coding required."}
+            ? "Switch an agent to live mode or hire a new one to start trading real money."
+            : "Hire your first AI trading agent in minutes. No coding required."}
         </Text>
       </View>
       <Button
@@ -1834,7 +1834,7 @@ function EmptyAgentsCard({ tradingMode, colors, isDark }: {
         icon={<Ionicons name="add" size={16} color="#fff" />}
         onPress={() => router.push("/(tabs)/agents")}
       >
-        Deploy Agent
+        Hire Agent
       </Button>
     </View>
   );

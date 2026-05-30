@@ -39,14 +39,14 @@ import type { AgentMode } from "@/store/agentStore";
 interface Props {
   visible: boolean;
   onClose: () => void;
-  onDeployed?: (agent: Agent) => void;
+  onHired?: (agent: Agent) => void;
 }
 
 type Step = 1 | 2 | 3 | 4;
 
-const STEP_LABELS = ["Strategy", "Configure", "AI Model", "Deploy"];
+const STEP_LABELS = ["Strategy", "Configure", "AI Model", "Hire"];
 
-export function DeploySheet({ visible, onClose, onDeployed }: Props) {
+export function HireSheet({ visible, onClose, onHired }: Props) {
   const { colors } = useTheme();
   const insets = useSafeAreaInsets();
   const { user: authUser } = useAuthStore();
@@ -64,8 +64,8 @@ export function DeploySheet({ visible, onClose, onDeployed }: Props) {
   const [timeHorizon, setTimeHorizon] = useState<TimeHorizonId>("medium");
   const [isPrivate, setIsPrivate] = useState(false);
   const [aggressive, setAggressive] = useState(false);
-  const [isDeploying, setIsDeploying] = useState(false);
-  const [deployError, setDeployError] = useState<string | null>(null);
+  const [isHiring, setIsHiring] = useState(false);
+  const [hireError, setHireError] = useState<string | null>(null);
 
   const plan = (authUser?.user_metadata?.plan as string) ?? "free";
   const strategy = STRATEGIES.find((s) => s.id === selectedStrategyId);
@@ -82,8 +82,8 @@ export function DeploySheet({ visible, onClose, onDeployed }: Props) {
     setTimeHorizon("medium");
     setIsPrivate(false);
     setAggressive(false);
-    setIsDeploying(false);
-    setDeployError(null);
+    setIsHiring(false);
+    setHireError(null);
     onClose();
   }
 
@@ -116,19 +116,19 @@ export function DeploySheet({ visible, onClose, onDeployed }: Props) {
     });
   }
 
-  async function handleDeploy() {
+  async function handleHire() {
     if (!authUser?.id || !selectedStrategyId || !strategy) return;
 
-    setIsDeploying(true);
-    setDeployError(null);
+    setIsHiring(true);
+    setHireError(null);
 
     try {
       // Check Alpaca keys for live mode
       if (mode === "live") {
         const keyStatus = await checkAlpacaKeyStatus(authUser.id);
         if (!keyStatus?.has_keys) {
-          setIsDeploying(false);
-          setDeployError(null);
+          setIsHiring(false);
+          setHireError(null);
           Alert.alert(
             "Connect Alpaca First",
             "Live trading requires your Alpaca API keys. Connect them in Settings.",
@@ -143,9 +143,9 @@ export function DeploySheet({ visible, onClose, onDeployed }: Props) {
 
       const { canCreate, current, limit } = await checkAgentLimit(authUser.id, plan);
       if (!canCreate) {
-        setIsDeploying(false);
-        setDeployError(
-          `Your ${plan} plan supports up to ${limit} active agent${limit === 1 ? "" : "s"}. You have ${current}. Upgrade to deploy more.`
+        setIsHiring(false);
+        setHireError(
+          `Your ${plan} plan supports up to ${limit} active agent${limit === 1 ? "" : "s"}. You have ${current}. Upgrade to hire more.`
         );
         return;
       }
@@ -172,26 +172,26 @@ export function DeploySheet({ visible, onClose, onDeployed }: Props) {
         model_id: selectedModel,
       });
 
-      setIsDeploying(false);
+      setIsHiring(false);
 
       if (error || !agent) {
-        console.error("[DeploySheet] deploy failed:", error);
-        setDeployError(error ?? "Something went wrong. Please try again.");
+        console.error("[HireSheet] hire failed:", error);
+        setHireError(error ?? "Something went wrong. Please try again.");
         return;
       }
 
-      // Send welcome notification on very first agent deployment
+      // Send welcome notification on very first agent hire
       const isFirstAgent = agents.length === 0;
       if (isFirstAgent) {
         sendWelcomeNotification(authUser.id, agent.name);
       }
 
-      onDeployed?.(agent);
+      onHired?.(agent);
       resetAndClose();
     } catch (e: any) {
-      console.error("[DeploySheet] deploy threw:", e);
-      setIsDeploying(false);
-      setDeployError(e?.message ?? "Unexpected error. Please try again.");
+      console.error("[HireSheet] hire threw:", e);
+      setIsHiring(false);
+      setHireError(e?.message ?? "Unexpected error. Please try again.");
     }
   }
 
@@ -274,7 +274,7 @@ export function DeploySheet({ visible, onClose, onDeployed }: Props) {
                 )}
                 <View style={{ flex: 1 }}>
                   <Text style={{ color: colors.text, fontSize: 18, fontWeight: "700", letterSpacing: -0.3 }}>
-                    Deploy Agent
+                    Hire Agent
                   </Text>
                   <Text style={{ color: colors.textSecondary, fontSize: 12, marginTop: 2 }}>
                     Step {step} of 4 — {STEP_LABELS[step - 1]}
@@ -359,13 +359,13 @@ export function DeploySheet({ visible, onClose, onDeployed }: Props) {
                   timeHorizon={timeHorizon}
                   isPrivate={isPrivate}
                   aggressive={aggressive}
-                  isDeploying={isDeploying}
+                  isHiring={isHiring}
                   atLimit={atLimit}
                   plan={plan}
                   tierLimit={tierLimit}
-                  onDeploy={handleDeploy}
+                  onHire={handleHire}
                   insets={insets}
-                  deployError={deployError}
+                  hireError={hireError}
                 />
               )}
             </View>
@@ -1090,7 +1090,7 @@ function StepModel({
       })}
 
       <Button variant="primary" size="lg" onPress={onNext} style={{ marginTop: 6 }}>
-        Review & Deploy
+        Review & Hire
       </Button>
       <View style={{ height: 20 }} />
     </ScrollView>
@@ -1109,13 +1109,13 @@ function StepReview({
   timeHorizon,
   isPrivate,
   aggressive,
-  isDeploying,
+  isHiring,
   atLimit,
   plan,
   tierLimit,
-  onDeploy,
+  onHire,
   insets,
-  deployError,
+  hireError,
 }: {
   colors: any;
   strategy: Strategy;
@@ -1128,13 +1128,13 @@ function StepReview({
   timeHorizon: TimeHorizonId;
   isPrivate: boolean;
   aggressive: boolean;
-  isDeploying: boolean;
+  isHiring: boolean;
   atLimit: boolean;
   plan: string;
   tierLimit: number;
-  onDeploy: () => void;
+  onHire: () => void;
   insets: { bottom: number };
-  deployError: string | null;
+  hireError: string | null;
 }) {
   const model = AI_MODELS.find((m) => m.id === selectedModel)!;
   const risk = RISK_CONFIG[strategy.risk];
@@ -1167,7 +1167,7 @@ function StepReview({
         </Pressable>
       )}
 
-      {deployError && (
+      {hireError && (
         <View
           style={{
             backgroundColor: Colors.dangerBg,
@@ -1180,7 +1180,7 @@ function StepReview({
         >
           <Ionicons name="alert-circle-outline" size={18} color={Colors.danger} />
           <Text style={{ color: Colors.danger, fontSize: 13, fontWeight: "600", flex: 1 }}>
-            {deployError}
+            {hireError}
           </Text>
         </View>
       )}
@@ -1291,11 +1291,11 @@ function StepReview({
       <Button
         variant="primary"
         size="lg"
-        onPress={onDeploy}
-        loading={isDeploying}
+        onPress={onHire}
+        loading={isHiring}
         disabled={atLimit}
       >
-        Deploy Agent
+        Hire Agent
       </Button>
       <View style={{ height: insets.bottom + 8 }} />
     </ScrollView>

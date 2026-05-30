@@ -175,7 +175,7 @@ export default function SignUpScreen() {
                   Create account
                 </Text>
                 <Text style={{ color: colors.textSecondary, fontSize: 15 }}>
-                  Join AgentVault and deploy your first AI trading agent
+                  Join AgentVault and hire your first AI trading agent
                 </Text>
               </View>
             </View>

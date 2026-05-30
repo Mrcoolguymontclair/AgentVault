@@ -136,7 +136,7 @@ export const useNotificationStore = create<NotificationStore>((set, get) => ({
     const n = await insertNotification(
       userId,
       "welcome",
-      "🚀 Agent Deployed!",
+      "🚀 Agent Hired!",
       `${agentName} is live and scanning the market.`,
       {}
     );

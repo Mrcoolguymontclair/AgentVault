@@ -23,7 +23,7 @@ const SECTIONS: Section[] = [
   },
   {
     title: "2. Description of Service",
-    body: `${APP_NAME} is a simulated paper-trading platform that allows users to deploy AI-powered trading agents, track simulated portfolio performance, and compete on a community leaderboard. The Service is provided for educational and entertainment purposes only.\n\nFeatures include:\n• AI agent deployment with configurable trading strategies\n• Simulated paper trading using real-time market data\n• Portfolio performance tracking and analytics\n• Social features including leaderboards, agent sharing, and comments\n• Push notifications for agent activity`,
+    body: `${APP_NAME} is a simulated paper-trading platform that allows users to hire AI-powered trading agents, track simulated portfolio performance, and compete on a community leaderboard. The Service is provided for educational and entertainment purposes only.\n\nFeatures include:\n• AI agent hiring with configurable trading strategies\n• Simulated paper trading using real-time market data\n• Portfolio performance tracking and analytics\n• Social features including leaderboards, agent sharing, and comments\n• Push notifications for agent activity`,
   },
   {
     title: "3. Paper Trading — No Real Money",
@@ -45,7 +45,7 @@ const SECTIONS: Section[] = [
   },
   {
     title: "7. AI-Generated Trading Signals",
-    body: `${APP_NAME} uses artificial intelligence models, including large language models from Groq and Anthropic, to generate trading signals and decisions for your AI agents. You acknowledge that:\n\n• AI-generated signals are experimental and may be incorrect, incomplete, or inconsistent\n• AI models can produce unexpected or erroneous outputs ("hallucinations")\n• The accuracy of AI trading signals is not guaranteed\n• You assume full responsibility for the agents you deploy and their configurations\n• We make no warranty that AI agents will generate profitable simulated results`,
+    body: `${APP_NAME} uses artificial intelligence models, including large language models from Groq and Anthropic, to generate trading signals and decisions for your AI agents. You acknowledge that:\n\n• AI-generated signals are experimental and may be incorrect, incomplete, or inconsistent\n• AI models can produce unexpected or erroneous outputs ("hallucinations")\n• The accuracy of AI trading signals is not guaranteed\n• You assume full responsibility for the agents you hire and their configurations\n• We make no warranty that AI agents will generate profitable simulated results`,
   },
   {
     title: "8. Intellectual Property",

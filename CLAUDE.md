@@ -12,9 +12,10 @@
 5. Edge Functions use Deno runtime, not Node.js. TypeScript errors about 'Deno' are expected.
 6. Test on web: `npx expo start --web`
 7. Dark mode is primary. Test both dark and light.
-8. All short selling is DISABLED. Long-only trading.
+8. Short selling is OPT-IN per agent via `agents.can_short` (default FALSE). Agents without it are long-only. Shorts usually lose money — default OFF in the hire flow and warn the user. (Changed 2026-05-30; was "all shorts disabled".)
 9. Minimum stock price: $20. Minimum volume: 1M shares.
 10. Max 3 positions per agent. AI confidence >= 0.70 to execute.
+11. TERMINOLOGY: users "hire" an agent, not "deploy" it. All user-facing copy + the create-agent flow use "Hire". ("deploy/deployed capital" = money invested, a different meaning — leave those. `supabase functions deploy` = edge-function deploys — leave those too.)
 
 ## PROJECT OVERVIEW
 See PROJECT.md for full architecture details.
@@ -41,12 +42,12 @@ git add . && git commit -m "description" && git push origin main
 npx expo start --web
 ```
 
-## CURRENT STATE (May 2026)
-- 5 active paper trading agents ($1,000 each)
-- +$174.52 (+3.49%) all time return over 2 months
-- 77 total trades
-- News Trader is most active (68 trades)
-- Strategy overhaul just deployed: long-only, position management, higher quality filters
+## CURRENT STATE (2026-05-30)
+- ACCOUNT RESET: portfolio wiped to a fresh start. 0 agents, 0 trades, 0 holdings.
+- Account/login, Alpaca-key slot, subscription, and settings preserved.
+- Pre-reset data archived: project files in `archive/reset_2026-05-30/` + full DB schema `archive_reset_20260530`.
+- In flight: (a) "deploy"→"hire" rename, (b) opt-in per-agent short selling (`can_short`).
+- Migration 025 (orphan-short seal) was APPLIED 2026-05-30 before the reset.
 - Supabase project: aktzwattqlpadvnaglit
 - Vercel: agentvault-lyart.vercel.app
 - GitHub: github.com/Mrcoolguymontclair/AgentVault

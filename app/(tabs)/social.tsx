@@ -673,7 +673,7 @@ export default function SocialScreen() {
               <EmptyState
                 icon="trophy-outline"
                 title="Leaderboard Empty"
-                description="No public agents yet. Deploy an agent and make it public!"
+                description="No public agents yet. Hire an agent and make it public!"
               />
             )
           }

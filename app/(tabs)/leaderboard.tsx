@@ -451,7 +451,7 @@ export default function LeaderboardScreen() {
             description={
               searchQuery
                 ? `No agents matching "${searchQuery}".`
-                : "Be the first to deploy a public agent and claim #1."
+                : "Be the first to hire a public agent and claim #1."
             }
           />
         }

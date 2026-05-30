@@ -23,7 +23,7 @@ const SLIDES = [
     badge: "AI-Powered",
     title: "Autonomous\nTrading Agents",
     description:
-      "Deploy intelligent trading bots powered by Groq LLM and Alpaca Markets. Each agent runs your strategy 24/7 without you lifting a finger.",
+      "Hire intelligent trading bots powered by Groq LLM and Alpaca Markets. Each agent runs your strategy 24/7 without you lifting a finger.",
     features: [
       { icon: "flash-outline" as const, text: "Sub-second execution" },
       { icon: "analytics-outline" as const, text: "LLM-driven decisions" },

@@ -19,7 +19,7 @@ import { Button } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { CardSkeleton } from "@/components/ui/LoadingSkeleton";
 import { Sparkline } from "@/components/ui/Sparkline";
-import { DeploySheet } from "@/components/agents/DeploySheet";
+import { HireSheet } from "@/components/agents/HireSheet";
 import { formatCurrency, formatPercent } from "@/utils/format";
 import { Colors } from "@/constants/colors";
 import { STRATEGIES, RISK_CONFIG } from "@/constants/strategies";
@@ -44,7 +44,7 @@ export default function AgentsScreen() {
   const { agents, toggleAgent, isLoading, loadAgents } = useAgentStore();
   const [filter, setFilter] = useState<FilterStatus>("all");
   const [refreshing, setRefreshing] = useState(false);
-  const [showDeploy, setShowDeploy] = useState(false);
+  const [showHire, setShowHire] = useState(false);
   const [pnlHistories, setPnlHistories] = useState<Record<string, number[]>>({});
   // Bug 17: per-agent max drawdown computed from trades
   const [agentMaxDD, setAgentMaxDD] = useState<Record<string, number>>({});
@@ -149,9 +149,9 @@ export default function AgentsScreen() {
           variant="primary"
           size="sm"
           icon={<Ionicons name="add" size={16} color="#fff" />}
-          onPress={() => setShowDeploy(true)}
+          onPress={() => setShowHire(true)}
         >
-          Deploy
+          Hire
         </Button>
       </View>
 
@@ -243,11 +243,11 @@ export default function AgentsScreen() {
             title="No Agents Found"
             description={
               filter === "all"
-                ? "You haven't deployed any agents yet. Choose a strategy and launch your first AI trading agent."
+                ? "You haven't hired any agents yet. Choose a strategy and launch your first AI trading agent."
                 : `No agents with status "${filter}" found.`
             }
-            ctaLabel={filter === "all" ? "Deploy First Agent" : undefined}
-            onCta={filter === "all" ? () => setShowDeploy(true) : undefined}
+            ctaLabel={filter === "all" ? "Hire First Agent" : undefined}
+            onCta={filter === "all" ? () => setShowHire(true) : undefined}
           />
         ) : (
           filtered.map((agent) => (
@@ -265,12 +265,12 @@ export default function AgentsScreen() {
         )}
       </ScrollView>
 
-      {/* Deploy Sheet */}
-      <DeploySheet
-        visible={showDeploy}
-        onClose={() => setShowDeploy(false)}
-        onDeployed={() => {
-          setShowDeploy(false);
+      {/* Hire Sheet */}
+      <HireSheet
+        visible={showHire}
+        onClose={() => setShowHire(false)}
+        onHired={() => {
+          setShowHire(false);
           if (authUser?.id) loadAgents(authUser.id);
         }}
       />
