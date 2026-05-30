@@ -4,6 +4,14 @@ All notable changes to this project are documented here. Newest entries at the t
 
 ---
 
+## [2026-05-30] — fix(run-agents): BUG-007 — long-close sells bypass AI confirmation
+
+- `index.ts:329`: `isExit` now also true when `signal.side === "sell" && (agentPositions[symbol] ?? 0) > 0`. Strategy-emitted sells that close a held long were being routed through Groq `confirmTrade` and frequently rejected ("stop-loss triggered, signal not valid"), blocking profitable exits. Treating a held-long sell as an exit bypasses AI confirmation.
+- Short behavior unchanged: the `> 0` guard means a sell on a flat/short position (held ≤ 0) is still a short-OPEN entry and still goes through AI. `isShortOpen` (`canShort && sell && !isExit && held ≤ 0`) is unaffected for held > 0 because `isExit` now short-circuits it.
+- `npx tsc --noEmit`: 0 new errors. **Deploy:** `supabase functions deploy run-agents --no-verify-jwt`
+
+---
+
 ## [2026-05-30] — feat(agents): opt-in per-agent short selling (`can_short`, rule 8)
 
 Short selling is now opt-in per agent, default OFF (long-only). Long-only agents (`can_short=false`) behave exactly as before. Shipped as two logical commits.

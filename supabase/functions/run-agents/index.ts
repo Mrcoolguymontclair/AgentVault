@@ -326,7 +326,10 @@ async function executeSignal(
 ): Promise<ExecutionResult> {
   const base: ExecutionResult = { agentId: agent.id, agentName: agent.name, success: false };
 
-  const isExit = signal.isExit === true;
+  // BUG-007: a strategy-emitted sell of a symbol the agent holds LONG is an
+  // exit — bypass AI confirmation (which was rejecting profitable closes). The
+  // `> 0` guard keeps sells on flat/short positions as short-OPEN entries.
+  const isExit = signal.isExit === true || (signal.side === "sell" && (agentPositions[signal.symbol] ?? 0) > 0);
   const canShort = agent.can_short === true;
   const currentHeldQty = agentPositions[signal.symbol] ?? 0;
   // Trade classification (rule 8: shorting is opt-in per agent):
